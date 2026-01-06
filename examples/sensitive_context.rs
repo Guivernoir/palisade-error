@@ -6,7 +6,7 @@ use palisade_errors::{AgentError, definitions, Result};
 use std::fs::File;
 use std::io;
 
-fn load_config_file(path: &str) -> Result<String> {
+fn load_config_file(path: String) -> Result<String> {
     // Simulate file reading
     Err(AgentError::from_io_path(
         definitions::IO_READ_FAILED,
@@ -22,7 +22,7 @@ fn validate_credentials(username: &str, token: &str) -> Result<()> {
             definitions::CFG_MISSING_REQUIRED,
             "validate_credentials",
             "Username is required",
-            &format!("Empty username for token: {}", &token[..8.min(token.len())])
+            format!("Empty username for token: {}", &token[..8.min(token.len())])
         ));
     }
     
@@ -31,7 +31,7 @@ fn validate_credentials(username: &str, token: &str) -> Result<()> {
             definitions::CFG_INVALID_VALUE,
             "validate_credentials",
             "Token must be at least 32 characters",
-            &format!("Token length: {} for user: {}", token.len(), username)
+            format!("Token length: {} for user: {}", token.len(), username)
         ));
     }
     
@@ -43,7 +43,7 @@ fn main() {
     
     // Example 1: File path handling
     println!("1. File I/O with sensitive path:");
-    let secret_path = "/etc/palisade/secrets.toml";
+    let secret_path = "/etc/palisade/secrets.toml".to_string();
     match load_config_file(secret_path) {
         Ok(_) => println!("   ✓ File loaded"),
         Err(e) => {

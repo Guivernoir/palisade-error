@@ -14,7 +14,7 @@ use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Context field with sensitivity classification.
-#[derive(Clone, ZeroizeOnDrop)]
+#[derive(Clone)]
 pub enum ContextField {
     /// Safe to display externally (RESERVED)
     #[cfg(feature = "external_signaling")]
@@ -43,6 +43,8 @@ impl Zeroize for ContextField {
         }
     }
 }
+
+impl ZeroizeOnDrop for ContextField {}
 
 impl ContextField {
     /// Get the string slice from this field.

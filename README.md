@@ -2,9 +2,7 @@
 
 **Security-conscious error handling for high-assurance Rust applications.**
 
-[![Crates.io](https://img.shields.io/crates/v/palisade_errors)](https://crates.io/crates/palisade_errors)
-[![Documentation](https://docs.rs/palisade_errors/badge.svg)](https://docs.rs/palisade_errors)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Palisade Errors is designed for systems where **information leakage is a security vulnerability**. It enforces a strict separation between "what happened" (forensics) and "what the user sees" (sanitization), while guaranteeing that sensitive data in memory is zeroized immediately after use.
 

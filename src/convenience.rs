@@ -49,7 +49,7 @@ macro_rules! config_err {
     };
     // Format case: format string must be literal, args can be expressions
     ($code:expr, $op:literal, $fmt:literal, $($arg:expr),+ $(,)?) => {
-        $crate::AgentError::config($code, $op, &format!($fmt, $($arg),+))
+        $crate::AgentError::config($code, $op, format!($fmt, $($arg),+))
     };
 }
 
@@ -69,7 +69,7 @@ macro_rules! deployment_err {
         $crate::AgentError::deployment($code, $op, $details)
     };
     ($code:expr, $op:literal, $fmt:literal, $($arg:expr),+ $(,)?) => {
-        $crate::AgentError::deployment($code, $op, &format!($fmt, $($arg),+))
+        $crate::AgentError::deployment($code, $op, format!($fmt, $($arg),+))
     };
 }
 
@@ -80,7 +80,7 @@ macro_rules! telemetry_err {
         $crate::AgentError::telemetry($code, $op, $details)
     };
     ($code:expr, $op:literal, $fmt:literal, $($arg:expr),+ $(,)?) => {
-        $crate::AgentError::telemetry($code, $op, &format!($fmt, $($arg),+))
+        $crate::AgentError::telemetry($code, $op, format!($fmt, $($arg),+))
     };
 }
 
@@ -91,7 +91,7 @@ macro_rules! correlation_err {
         $crate::AgentError::correlation($code, $op, $details)
     };
     ($code:expr, $op:literal, $fmt:literal, $($arg:expr),+ $(,)?) => {
-        $crate::AgentError::correlation($code, $op, &format!($fmt, $($arg),+))
+        $crate::AgentError::correlation($code, $op, format!($fmt, $($arg),+))
     };
 }
 
@@ -102,7 +102,7 @@ macro_rules! response_err {
         $crate::AgentError::response($code, $op, $details)
     };
     ($code:expr, $op:literal, $fmt:literal, $($arg:expr),+ $(,)?) => {
-        $crate::AgentError::response($code, $op, &format!($fmt, $($arg),+))
+        $crate::AgentError::response($code, $op, format!($fmt, $($arg),+))
     };
 }
 
@@ -113,7 +113,7 @@ macro_rules! logging_err {
         $crate::AgentError::logging($code, $op, $details)
     };
     ($code:expr, $op:literal, $fmt:literal, $($arg:expr),+ $(,)?) => {
-        $crate::AgentError::logging($code, $op, &format!($fmt, $($arg),+))
+        $crate::AgentError::logging($code, $op, format!($fmt, $($arg),+))
     };
 }
 
@@ -124,7 +124,7 @@ macro_rules! platform_err {
         $crate::AgentError::platform($code, $op, $details)
     };
     ($code:expr, $op:literal, $fmt:literal, $($arg:expr),+ $(,)?) => {
-        $crate::AgentError::platform($code, $op, &format!($fmt, $($arg),+))
+        $crate::AgentError::platform($code, $op, format!($fmt, $($arg),+))
     };
 }
 
@@ -135,7 +135,7 @@ macro_rules! io_err {
         $crate::AgentError::io_operation($code, $op, $details)
     };
     ($code:expr, $op:literal, $fmt:literal, $($arg:expr),+ $(,)?) => {
-        $crate::AgentError::io_operation($code, $op, &format!($fmt, $($arg),+))
+        $crate::AgentError::io_operation($code, $op, format!($fmt, $($arg),+))
     };
 }
 
@@ -145,7 +145,7 @@ mod tests {
     fn test_literal_enforcement_compiles() {
         use crate::{config_err, definitions};
         
-        // These should compile
+        // This should compile
         let _err1 = config_err!(definitions::CFG_PARSE_FAILED, "test_op", "test details");
         let line = 42;
         let _err2 = config_err!(definitions::CFG_PARSE_FAILED, "test_op", "line {}", line);

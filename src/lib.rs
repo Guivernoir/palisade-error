@@ -68,8 +68,8 @@
 //! use palisade_errors::{AgentError, definitions, Result};
 //! use std::fs::File;
 //!
-//! fn load_config(path: &str) -> Result<File> {
-//!     File::open(path).map_err(|e|
+//! fn load_config(path: String) -> Result<File> {
+//!     File::open(&path).map_err(|e|
 //!         AgentError::from_io_path(
 //!             definitions::IO_READ_FAILED,
 //!             "load_config",
@@ -115,6 +115,7 @@ use std::result;
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 use std::error::Error;
+use std::borrow::Cow;
 
 pub mod codes;
 pub mod context;
@@ -168,7 +169,7 @@ pub struct AgentError {
 impl AgentError {
     /// Create a generic error with internal context only.
     #[inline]
-    fn new(code: ErrorCode, operation: impl Into<String>, details: impl Into<String>) -> Self {
+    fn new(code: ErrorCode, operation: impl Into<Cow<'static, str>>, details: impl Into<Cow<'static, str>>) -> Self {
         Self {
             code,
             context: ErrorContext::new(operation, details),
@@ -182,9 +183,9 @@ impl AgentError {
     #[inline]
     fn new_sensitive(
         code: ErrorCode,
-        operation: impl Into<String>,
-        details: impl Into<String>,
-        sensitive_info: impl Into<String>,
+        operation: impl Into<Cow<'static, str>>,
+        details: impl Into<Cow<'static, str>>,
+        sensitive_info: impl Into<Cow<'static, str>>,
     ) -> Self {
         Self {
             code,
@@ -202,10 +203,10 @@ impl AgentError {
     #[inline]
     fn new_with_split_source(
         code: ErrorCode,
-        operation: impl Into<String>,
-        details: impl Into<String>,
-        internal_source: impl Into<String>,
-        sensitive_source: impl Into<String>,
+        operation: impl Into<Cow<'static, str>>,
+        details: impl Into<Cow<'static, str>>,
+        internal_source: impl Into<Cow<'static, str>>,
+        sensitive_source: impl Into<Cow<'static, str>>,
     ) -> Self {
         Self {
             code,
@@ -232,7 +233,7 @@ impl AgentError {
     ///
     /// MUTATES IN PLACE - no cloning, no wasted allocations.
     #[inline]
-    pub fn with_metadata(mut self, key: &'static str, value: impl Into<String>) -> Self {
+    pub fn with_metadata(mut self, key: &'static str, value: impl Into<Cow<'static, str>>) -> Self {
         self.context.add_metadata(key, value);
         self
     }
@@ -386,55 +387,92 @@ impl AgentError {
 
     /// Create a configuration error
     #[inline]
-    pub fn config(code: ErrorCode, operation: &str, details: &str) -> Self {
+    pub fn config(
+        code: ErrorCode, 
+        operation: impl Into<Cow<'static, str>>, 
+        details: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::new(code, operation, details)
     }
 
     /// Create a configuration error with sensitive context
     #[inline]
-    pub fn config_sensitive(code: ErrorCode, operation: &str, details: &str, sensitive: &str) -> Self {
+    pub fn config_sensitive(
+        code: ErrorCode, 
+        operation: impl Into<Cow<'static, str>>, 
+        details: impl Into<Cow<'static, str>>, 
+        sensitive: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::new_sensitive(code, operation, details, sensitive)
     }
 
     /// Create a deployment error
     #[inline]
-    pub fn deployment(code: ErrorCode, operation: &str, details: &str) -> Self {
+    pub fn deployment(
+        code: ErrorCode, 
+        operation: impl Into<Cow<'static, str>>, 
+        details: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::new(code, operation, details)
     }
 
     /// Create a telemetry error
     #[inline]
-    pub fn telemetry(code: ErrorCode, operation: &str, details: &str) -> Self {
+    pub fn telemetry(
+        code: ErrorCode, 
+        operation: impl Into<Cow<'static, str>>, 
+        details: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::new(code, operation, details)
     }
 
     /// Create a correlation error
     #[inline]
-    pub fn correlation(code: ErrorCode, operation: &str, details: &str) -> Self {
+    pub fn correlation(
+        code: ErrorCode, 
+        operation: impl Into<Cow<'static, str>>, 
+        details: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::new(code, operation, details)
     }
 
     /// Create a response error
     #[inline]
-    pub fn response(code: ErrorCode, operation: &str, details: &str) -> Self {
+    pub fn response(
+        code: ErrorCode, 
+        operation: impl Into<Cow<'static, str>>, 
+        details: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::new(code, operation, details)
     }
 
     /// Create a logging error
     #[inline]
-    pub fn logging(code: ErrorCode, operation: &str, details: &str) -> Self {
+    pub fn logging(
+        code: ErrorCode, 
+        operation: impl Into<Cow<'static, str>>, 
+        details: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::new(code, operation, details)
     }
 
     /// Create a platform error
     #[inline]
-    pub fn platform(code: ErrorCode, operation: &str, details: &str) -> Self {
+    pub fn platform(
+        code: ErrorCode, 
+        operation: impl Into<Cow<'static, str>>, 
+        details: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::new(code, operation, details)
     }
 
     /// Create an I/O operation error
     #[inline]
-    pub fn io_operation(code: ErrorCode, operation: &str, details: &str) -> Self {
+    pub fn io_operation(
+        code: ErrorCode, 
+        operation: impl Into<Cow<'static, str>>, 
+        details: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self::new(code, operation, details)
     }
 
@@ -449,8 +487,8 @@ impl AgentError {
     #[inline]
     pub fn from_io_path(
         code: ErrorCode,
-        operation: &str,
-        path: &str,
+        operation: impl Into<Cow<'static, str>>,
+        path: impl Into<Cow<'static, str>>,
         error: io::Error,
     ) -> Self {
         Self::new_with_split_source(
@@ -458,7 +496,7 @@ impl AgentError {
             operation,
             "I/O operation failed",
             format!("{:?}", error.kind()),  // Internal: error kind
-            path.to_string(),                // Sensitive: filesystem path
+            path.into(),                // Sensitive: filesystem path
         )
     }
 }

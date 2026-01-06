@@ -114,9 +114,9 @@ impl ErrorContext {
     }
 
     pub fn with_sensitive(
-        operation: impl Into<String>,
-        details: impl Into<String>,
-        sensitive_info: impl Into<String>,
+        operation: impl Into<Cow<'static, str>>,
+        details: impl Into<Cow<'static, str>>,
+        sensitive_info: impl Into<Cow<'static, str>>,
     ) -> Self {
         Self {
             operation: ContextField::Internal(operation.into()),
@@ -128,10 +128,10 @@ impl ErrorContext {
     }
 
     pub fn with_source_split(
-        operation: impl Into<String>,
-        details: impl Into<String>,
-        internal_source: impl Into<String>,
-        sensitive_source: impl Into<String>,
+        operation: impl Into<Cow<'static, str>>,
+        details: impl Into<Cow<'static, str>>,
+        internal_source: impl Into<Cow<'static, str>>,
+        sensitive_source: impl Into<Cow<'static, str>>,
     ) -> Self {
         Self {
             operation: ContextField::Internal(operation.into()),
@@ -144,7 +144,7 @@ impl ErrorContext {
 
     /// Add metadata in-place (no cloning, no allocation waste)
     #[inline]
-    pub fn add_metadata(&mut self, key: &'static str, value: impl Into<String>) {
+    pub fn add_metadata(&mut self, key: &'static str, value: impl Into<Cow<'static, str>>) {
         self.metadata.push((key, ContextField::Internal(value.into())));
     }
 }
