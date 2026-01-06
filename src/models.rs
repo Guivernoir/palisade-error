@@ -34,7 +34,7 @@ pub enum ContextField {
 impl ContextField {
     /// Get the string slice from this field.
     #[inline]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             #[cfg(feature = "external_signaling")]
             Self::Public(s) => s,

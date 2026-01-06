@@ -5,14 +5,13 @@ edition = "2024"
 authors = ["Guilherme F. G. Santos <strukturaenterprise@gmail.com>"]
 description = "Security-conscious error handling with operational security principles"
 license = "MIT or Apache-2.0"
-repository = "https://github.com/Guivernoir/palisade-errors"
+repository = "https://github.com/guivernoir/palisade_errors"
 documentation = "https://docs.rs/palisade_errors"
 readme = "README.md"
 keywords = ["error", "security", "zeroize", "opsec", "forensics"]
 categories = ["development-tools::debugging", "cryptography"]
 
 [dependencies]
-smallvec = "1.15.1"
 zeroize = { version = "1.7", features = ["derive"] }
 
 [features]
@@ -23,27 +22,14 @@ trusted_debug = []
 external_signaling = []
 
 [dev-dependencies]
-tempfile = "3.24.0"
 
 [[example]]
-name = "timing"
-path = "examples/auth_timing.rs"
+name = "basic_usage"
+path = "examples/basic_usage.rs"
 
 [[example]]
-name = "basic"
-path = "examples/basic_errors.rs"
-
-[[example]]
-name = "config_validation"
-path = "examples/config_validation.rs"
-
-[[example]]
-name = "logging"
-path = "examples/logging_integration.rs"
-
-[[example]]
-name = "retry"
-path = "examples/retry_logic.rs"
+name = "sensitive_context"
+path = "examples/sensitive_context.rs"
 
 [package.metadata.docs.rs]
 all-features = true
