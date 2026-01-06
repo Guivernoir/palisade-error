@@ -1,0 +1,36 @@
+[package]
+name = "palisade_errors"
+version = "0.1.0"
+edition = "2024"
+authors = ["Guilherme F. G. Santos <strukturaenterprise@gmail.com>"]
+description = "Security-conscious error handling with operational security principles"
+license = "MIT or Apache-2.0"
+repository = "https://github.com/guivernoir/palisade_errors"
+documentation = "https://docs.rs/palisade_errors"
+readme = "README.md"
+keywords = ["error", "security", "zeroize", "opsec", "forensics"]
+categories = ["development-tools::debugging", "cryptography"]
+
+[dependencies]
+zeroize = { version = "1.7", features = ["derive"] }
+
+[features]
+default = []
+# Enable detailed debug formatting for trusted environments only
+trusted_debug = []
+# Reserved for future external signaling capabilities
+external_signaling = []
+
+[dev-dependencies]
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[example]]
+name = "sensitive_context"
+path = "examples/sensitive_context.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

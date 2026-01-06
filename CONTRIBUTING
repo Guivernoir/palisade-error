@@ -1,0 +1,229 @@
+# Contributing to Palisade Errors
+
+Thank you for your interest in contributing to Palisade Errors! This document provides guidelines and instructions for contributing.
+
+## Development Setup
+
+1. Install Rust (1.70.0 or later):
+
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+2. Clone the repository:
+
+   ```bash
+   git clone https://github.com/yourusername/palisade_errors.git
+   cd palisade_errors
+   ```
+
+3. Build the project:
+
+   ```bash
+   cargo build
+   ```
+
+4. Run tests:
+   ```bash
+   cargo test
+   ```
+
+## Code Quality Standards
+
+Before submitting a pull request, ensure:
+
+### 1. Tests Pass
+
+```bash
+cargo test --all-features
+```
+
+### 2. Code is Formatted
+
+```bash
+cargo fmt --check
+```
+
+To auto-format:
+
+```bash
+cargo fmt
+```
+
+### 3. No Clippy Warnings
+
+```bash
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+### 4. Documentation Builds
+
+```bash
+cargo doc --no-deps --all-features
+```
+
+### 5. Examples Run
+
+```bash
+cargo run --example basic_usage
+cargo run --example sensitive_context
+cargo run --example sensitive_context --features trusted_debug
+```
+
+## Security Considerations
+
+This crate handles sensitive error context. When contributing, please:
+
+1. **Maintain Zeroization**: Ensure all new context fields are zeroized on drop
+2. **No Information Leakage**: External display must not reveal sensitive data
+3. **Explicit Lifetimes**: Log entries must be lifetime-bound to prevent retention
+4. **Test Security Properties**: Add tests for any new security features
+5. **Document Threat Model**: Update documentation if threat model changes
+
+### Security Testing Checklist
+
+- [ ] All new fields are zeroized on drop
+- [ ] External `Display` implementation doesn't leak sensitive data
+- [ ] Internal log entries have explicit lifetimes
+- [ ] Sensitive data is explicitly marked with `ContextField::Sensitive`
+- [ ] Added tests verifying security properties
+
+## Adding New Error Codes
+
+When adding new error codes:
+
+1. Choose the appropriate namespace (CORE, CFG, DCP, TEL, COR, RSP, LOG, PLT, IO)
+2. Add the code definition in `src/definitions.rs`
+3. Ensure the code falls within the namespace's reserved range
+4. Add documentation explaining when to use the code
+5. Add test coverage for the new code
+
+Example:
+
+```rust
+/// New configuration error for API key validation
+pub const CFG_INVALID_API_KEY: ErrorCode =
+    ErrorCode::new("CFG", 105, OperationCategory::Configuration);
+```
+
+## Adding New Features
+
+1. Discuss the feature in an issue first
+2. Update `Cargo.toml` if adding a new feature flag
+3. Add comprehensive documentation
+4. Add examples demonstrating the feature
+5. Update README.md and CHANGELOG.md
+
+## Documentation Standards
+
+- All public items must have documentation comments
+- Use examples in doc comments where helpful
+- Document safety properties for security-sensitive code
+- Keep documentation up-to-date with code changes
+
+Example:
+
+````rust
+/// Create an error with sensitive information.
+///
+/// # Security
+///
+/// The sensitive information is zeroized when the error is dropped.
+///
+/// # Example
+///
+/// ```rust
+/// use palisade_errors::{AgentError, codes};
+///
+/// let err = AgentError::config_sensitive(
+///     codes::CFG_PARSE_FAILED,
+///     "parse_config",
+///     "Invalid syntax",
+///     "/etc/secret/config.toml"
+/// );
+/// ```
+pub fn config_sensitive(...) -> Self { ... }
+````
+
+## Testing Guidelines
+
+### Unit Tests
+
+- Test individual functions and methods
+- Use the `#[test]` attribute
+- Place in the same file as the code being tested
+
+### Integration Tests
+
+- Test interactions between modules
+- Place in `tests/` directory
+
+### Security Tests
+
+- Verify zeroization behavior
+- Test that sensitive data doesn't leak
+- Ensure lifetime enforcement works correctly
+
+### Example Test
+
+```rust
+#[test]
+fn test_sensitive_data_not_in_display() {
+    let err = AgentError::config_sensitive(
+        codes::CFG_PARSE_FAILED,
+        "test",
+        "test",
+        "secret_value"
+    );
+
+    let display = err.to_string();
+    assert!(!display.contains("secret_value"));
+}
+```
+
+## Pull Request Process
+
+1. Create a feature branch from `main`
+2. Make your changes
+3. Add tests and documentation
+4. Ensure all checks pass (see Code Quality Standards)
+5. Submit a pull request with:
+   - Clear description of changes
+   - Reference to related issues
+   - Breaking changes noted (if any)
+   - Security implications documented (if any)
+
+### PR Title Format
+
+- `feat: Add new error code for X`
+- `fix: Correct zeroization for Y`
+- `docs: Update README with Z`
+- `test: Add coverage for W`
+- `refactor: Simplify V`
+
+## Release Process
+
+(For maintainers)
+
+1. Update version in `Cargo.toml`
+2. Update `CHANGELOG.md`
+3. Create a git tag: `git tag -a v0.1.0 -m "Release v0.1.0"`
+4. Push tag: `git push origin v0.1.0`
+5. Publish to crates.io: `cargo publish`
+
+## Code of Conduct
+
+This project follows the [Rust Code of Conduct](https://www.rust-lang.org/policies/code-of-conduct).
+
+## Questions?
+
+Feel free to open an issue for:
+
+- Bug reports
+- Feature requests
+- Documentation improvements
+- Questions about the design
+
+## License
+
+By contributing, you agree that your contributions will be dual-licensed under MIT and Apache-2.0, matching the project's license.
