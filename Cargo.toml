@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Guilherme F. G. Santos <strukturaenterprise@gmail.com>"]
 description = "Security-conscious error handling with operational security principles"
-license = "MIT or Apache-2.0"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/guivernoir/palisade_errors"
 documentation = "https://docs.rs/palisade_errors"
 readme = "README.md"
@@ -15,6 +15,12 @@ categories = ["development-tools::debugging", "cryptography"]
 smallvec = "1.15.1"
 zeroize = { version = "1.7", features = ["derive"] }
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+chrono = "0.4.42"
+md5 = "0.8.0"
+serde_json = "1.0.149"
+
 [features]
 default = []
 # Enable detailed debug formatting for trusted environments only
@@ -22,7 +28,9 @@ trusted_debug = []
 # Reserved for future external signaling capabilities
 external_signaling = []
 
-[dev-dependencies]
+# ============================================================================
+# EXAMPLES
+# ============================================================================
 
 [[example]]
 name = "basic_usage"
@@ -32,6 +40,32 @@ path = "examples/basic_usage.rs"
 name = "sensitive_context"
 path = "examples/sensitive_context.rs"
 
+[[example]]
+name = "honeypot_pipeline"
+path = "examples/honeypot_pipeline.rs"
+
+[[example]]
+name = "logging"
+path = "examples/production_logging.rs"
+
+# ============================================================================
+# BENCHMARKS
+# ============================================================================
+
+[[bench]]
+name = "error_performance"
+harness = false
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
+
+# ============================================================================
+# PROFILE CONFIGURATIONS
+# ============================================================================
+
+[profile.bench]
+# Optimize for performance during benchmarks
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -49,7 +49,7 @@ impl ZeroizeOnDrop for ContextField {}
 impl ContextField {
     /// Get the string slice from this field.
     #[inline]
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             #[cfg(feature = "external_signaling")]
             Self::Public(c) => c.as_ref(),

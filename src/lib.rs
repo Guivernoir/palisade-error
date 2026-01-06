@@ -123,6 +123,7 @@ pub mod convenience;
 pub mod definitions;
 pub mod logging;
 pub mod models;
+pub mod tests;
 
 pub use codes::*;
 pub use context::*;
@@ -287,6 +288,15 @@ impl AgentError {
     /// This adds a sleep to the error path, which is acceptable since errors
     /// are not the hot path. The slight performance cost is worth the security
     /// benefit for sensitive operations.
+    ///
+    /// # Limitations
+    /// 
+    /// - **Not async-safe**: Blocks the thread. Use in sync contexts only.
+    /// - **Coarse precision**: OS scheduling affects accuracy (1-15ms jitter).
+    /// - **Partial protection**: Only normalizes error return timing, not upstream operations.
+    /// - **Observable side-channels**: Network timing, cache behavior, DB queries remain.
+    /// 
+    /// This provides defense-in-depth against timing attacks but is not a complete solution.
     #[inline]
     pub fn with_timing_normalization(self, target_duration: Duration) -> Self {
         let elapsed = self.created_at.elapsed();
@@ -572,7 +582,7 @@ impl std::error::Error for AgentError {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
