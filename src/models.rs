@@ -1,34 +1,47 @@
 //! Context field with sensitivity classification.
 //!
 //! This determines both protection level and visibility:
-//! - Public: Safe for external display (error codes, retry hints) - RESERVED FOR FUTURE USE
-//! - Internal: Authenticated logs only (operation names, generic details)
-//! - Sensitive: Contains PII/secrets (file paths, usernames, credentials)
+//! - Public: Safe for external display
+//! - Internal: Authenticated logs only
+//! - Sensitive: Contains PII/secrets
 //!
-//! All variants are zeroized on drop to prevent memory scraping attacks.
-//!
-//! # Note on Public Variant
-//!
-//! `Public` is currently reserved for future external signaling capabilities.
-//! When implemented, it will allow selective field exposure in sanitized outputs
-//! while maintaining the security invariant that only explicitly-public data
-//! can appear in `Display` formatting.
+//! # Optimization
+//! Uses `Cow<'static, str>` to allow zero-allocation storage of string literals
+//! while still supporting dynamic strings when necessary.
 
+use std::borrow::Cow;
 use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Context field with sensitivity classification.
-///
-/// Determines protection level and visibility for error context data.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub enum ContextField {
-    /// Safe to display externally (RESERVED - not yet used)
+    /// Safe to display externally (RESERVED)
     #[cfg(feature = "external_signaling")]
-    Public(String),
+    Public(Cow<'static, str>),
     /// Internal logging only
-    Internal(String),
+    Internal(Cow<'static, str>),
     /// Contains sensitive data (paths, usernames, secrets)
-    Sensitive(String),
+    Sensitive(Cow<'static, str>),
+}
+
+// Manual Zeroize implementation is required because we cannot
+// zeroize a static string slice (Cow::Borrowed). We only zeroize owned data.
+impl Zeroize for ContextField {
+    fn zeroize(&mut self) {
+        match self {
+            #[cfg(feature = "external_signaling")]
+            Self::Public(cow) => {
+                if let Cow::Owned(s) = cow { s.zeroize(); }
+            }
+            Self::Internal(cow) => {
+                if let Cow::Owned(s) = cow { s.zeroize(); }
+            }
+            Self::Sensitive(cow) => {
+                if let Cow::Owned(s) = cow { s.zeroize(); }
+            }
+        }
+    }
 }
 
 impl ContextField {
@@ -37,16 +50,10 @@ impl ContextField {
     pub(crate) fn as_str(&self) -> &str {
         match self {
             #[cfg(feature = "external_signaling")]
-            Self::Public(s) => s,
-            Self::Internal(s) => s,
-            Self::Sensitive(s) => s,
+            Self::Public(c) => c.as_ref(),
+            Self::Internal(c) => c.as_ref(),
+            Self::Sensitive(c) => c.as_ref(),
         }
-    }
-
-    /// Check if this field contains sensitive data.
-    #[inline]
-    pub(crate) fn is_sensitive(&self) -> bool {
-        matches!(self, Self::Sensitive(_))
     }
 }
 
@@ -54,10 +61,16 @@ impl fmt::Debug for ContextField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             #[cfg(feature = "external_signaling")]
-            Self::Public(s) => write!(f, "Public({:?})", s),
-            Self::Internal(s) => write!(f, "Internal({:?})", s),
+            Self::Public(c) => write!(f, "Public({:?})", c),
+            Self::Internal(c) => write!(f, "Internal({:?})", c),
             Self::Sensitive(_) => write!(f, "Sensitive([REDACTED])"),
         }
+    }
+}
+
+impl fmt::Display for ContextField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

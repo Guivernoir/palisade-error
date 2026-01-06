@@ -12,6 +12,7 @@ keywords = ["error", "security", "zeroize", "opsec", "forensics"]
 categories = ["development-tools::debugging", "cryptography"]
 
 [dependencies]
+smallvec = "1.15.1"
 zeroize = { version = "1.7", features = ["derive"] }
 
 [features]
