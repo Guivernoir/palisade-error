@@ -9,6 +9,7 @@
 //! 3. **Error codes enable tracking** without information disclosure
 //! 4. **Sensitive data is explicitly marked** and zeroized
 //! 5. **Sanitization is mandatory** and provides useful signals without leaking details
+//! 6. **Timing attacks are mitigated** through optional normalization
 //!
 //! ## Security Principles
 //!
@@ -18,6 +19,7 @@
 //! - Sanitized output still provides operation category and retry hints
 //! - ALL context data is zeroized on drop - NO LEAKS, NO EXCEPTIONS
 //! - Zero-allocation hot paths where possible
+//! - Timing side-channels can be mitigated with normalization
 //!
 //! ## Threat Model
 //!
@@ -35,6 +37,7 @@
 //! - No string concatenation of sensitive data
 //! - No leaked allocations that bypass zeroization
 //! - Sensitive/Internal fields kept separate to prevent conflation
+//! - Timing normalization available for sensitive operations
 //!
 //! ## Quick Start
 //!
@@ -77,9 +80,29 @@
 //! }
 //! ```
 //!
+//! ## Timing Attack Mitigation
+//!
+//! ```rust
+//! use palisade_errors::{AgentError, definitions, Result};
+//! use std::time::Duration;
+//!
+//! fn authenticate(username: &str, password: &str) -> Result<()> {
+//!     // Perform authentication...
+//!     # Ok(())
+//! }
+//!
+//! // Normalize timing to prevent timing side-channels
+//! let result = authenticate("user", "pass");
+//! if let Err(e) = result {
+//!     // Delay error response to constant time
+//!     return Err(e.with_timing_normalization(Duration::from_millis(100)));
+//! }
+//! # Ok(())
+//! ```
+//!
 //! ## Features
 //!
-//! - `trusted_debug`: Enable detailed debug formatting for trusted environments
+//! - `trusted_debug`: Enable detailed debug formatting for trusted environments (debug builds only)
 //! - `external_signaling`: Reserved for future external signaling capabilities
 
 #![warn(missing_docs)]
@@ -89,7 +112,9 @@
 use std::fmt;
 use std::io;
 use std::result;
+use std::time::{Duration, Instant};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+use std::error::Error;
 
 pub mod codes;
 pub mod context;
@@ -97,7 +122,6 @@ pub mod convenience;
 pub mod definitions;
 pub mod logging;
 pub mod models;
-mod tests;
 
 pub use codes::*;
 pub use context::*;
@@ -113,11 +137,12 @@ pub type Result<T> = result::Result<T, AgentError>;
 ///
 /// # Key Properties
 ///
-/// - All context is zeroized on drop
+/// - All context is zeroized on drop (including source errors)
 /// - External display reveals minimal information
 /// - Internal logging uses structured data with explicit lifetimes
 /// - No implicit conversions from stdlib errors
 /// - Hot paths are zero-allocation where possible
+/// - Optional timing normalization to prevent timing side-channels
 ///
 /// # Design Rationale - Error Constructors
 ///
@@ -136,6 +161,8 @@ pub struct AgentError {
     code: ErrorCode,
     context: ErrorContext,
     retryable: bool,
+    source: Option<Box<dyn Error + Send + Sync>>,
+    created_at: Instant,
 }
 
 impl AgentError {
@@ -146,6 +173,8 @@ impl AgentError {
             code,
             context: ErrorContext::new(operation, details),
             retryable: false,
+            source: None,
+            created_at: Instant::now(),
         }
     }
 
@@ -161,6 +190,8 @@ impl AgentError {
             code,
             context: ErrorContext::with_sensitive(operation, details, sensitive_info),
             retryable: false,
+            source: None,
+            created_at: Instant::now(),
         }
     }
 
@@ -185,6 +216,8 @@ impl AgentError {
                 sensitive_source,
             ),
             retryable: false,
+            source: None,
+            created_at: Instant::now(),
         }
     }
 
@@ -204,6 +237,64 @@ impl AgentError {
         self
     }
 
+    /// Normalize timing to prevent timing side-channel attacks.
+    ///
+    /// This sleeps until `target_duration` has elapsed since error creation,
+    /// ensuring that error responses take a consistent amount of time regardless
+    /// of which code path failed.
+    ///
+    /// # Use Cases
+    ///
+    /// - Authentication failures (prevent user enumeration)
+    /// - Sensitive file operations (prevent path existence probing)
+    /// - Cryptographic operations (prevent timing attacks on key material)
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use palisade_errors::{AgentError, definitions};
+    /// use std::time::Duration;
+    ///
+    /// fn authenticate(user: &str, pass: &str) -> palisade_errors::Result<()> {
+    ///     // Fast path: invalid username
+    ///     if !user_exists(user) {
+    ///         return Err(
+    ///             AgentError::config(definitions::CFG_VALIDATION_FAILED, "auth", "Invalid credentials")
+    ///                 .with_timing_normalization(Duration::from_millis(100))
+    ///         );
+    ///     }
+    ///     
+    ///     // Slow path: password hash check
+    ///     if !check_password(user, pass) {
+    ///         return Err(
+    ///             AgentError::config(definitions::CFG_VALIDATION_FAILED, "auth", "Invalid credentials")
+    ///                 .with_timing_normalization(Duration::from_millis(100))
+    ///         );
+    ///     }
+    ///     
+    ///     Ok(())
+    /// }
+    /// # fn user_exists(_: &str) -> bool { true }
+    /// # fn check_password(_: &str, _: &str) -> bool { true }
+    /// ```
+    ///
+    /// Both error paths now take at least 100ms, preventing attackers from
+    /// distinguishing between "user doesn't exist" and "wrong password".
+    ///
+    /// # Performance Note
+    ///
+    /// This adds a sleep to the error path, which is acceptable since errors
+    /// are not the hot path. The slight performance cost is worth the security
+    /// benefit for sensitive operations.
+    #[inline]
+    pub fn with_timing_normalization(self, target_duration: Duration) -> Self {
+        let elapsed = self.created_at.elapsed();
+        if let Some(remaining) = target_duration.checked_sub(elapsed) {
+            std::thread::sleep(remaining);
+        }
+        self
+    }
+
     /// Check if this error can be retried
     #[inline]
     pub const fn is_retryable(&self) -> bool {
@@ -220,6 +311,15 @@ impl AgentError {
     #[inline]
     pub const fn category(&self) -> OperationCategory {
         self.code.category()
+    }
+
+    /// Get the time elapsed since this error was created.
+    ///
+    /// Useful for metrics and debugging, but should NOT be exposed externally
+    /// as it could leak timing information.
+    #[inline]
+    pub fn age(&self) -> Duration {
+        self.created_at.elapsed()
     }
 
     /// Create structured internal log entry with explicit lifetime.
@@ -365,10 +465,21 @@ impl AgentError {
 
 // Manual Drop implementation to ensure proper zeroization ordering
 impl Drop for AgentError {
+    /// Panic-safe drop with explicit zeroization order.
+    ///
+    /// Marked #[inline(never)] to prevent optimization that could skip zeroization.
+    #[inline(never)]
     fn drop(&mut self) {
-        // Context is already ZeroizeOnDrop, but we're explicit here
-        // to document the security guarantee
-        self.context.zeroize();
+        // Use catch_unwind to ensure we attempt cleanup even if something panics
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Drop the source error first (may contain sensitive data)
+            // By setting to None, we ensure the boxed error is dropped
+            self.source = None;
+            
+            // Context zeroizes itself via ZeroizeOnDrop
+            // but we're explicit here for documentation
+            self.context.zeroize();
+        }));
     }
 }
 
@@ -378,7 +489,9 @@ impl fmt::Debug for AgentError {
             .field("code", &self.code)
             .field("category", &self.code.category())
             .field("retryable", &self.retryable)
+            .field("age", &self.created_at.elapsed())
             .field("context", &"<REDACTED>")
+            .field("source", &self.source.as_ref().map(|_| "<PRESENT>"))
             .finish()
     }
 }
@@ -401,6 +514,7 @@ impl fmt::Display for AgentError {
     /// - Validation logic
     /// - User identifiers
     /// - Configuration values
+    /// - Timing information
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let permanence = if self.retryable { "temporary" } else { "permanent" };
         write!(
@@ -415,7 +529,99 @@ impl fmt::Display for AgentError {
 
 impl std::error::Error for AgentError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        // We don't expose source errors externally to prevent information leakage
-        None
+        self.source.as_ref().map(|e| e.as_ref() as &(dyn std::error::Error + 'static))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn timing_normalization_adds_delay() {
+        let start = Instant::now();
+        let err = AgentError::config(
+            definitions::CFG_PARSE_FAILED,
+            "test",
+            "test"
+        );
+        
+        // This should add delay to reach 50ms
+        let _normalized = err.with_timing_normalization(Duration::from_millis(50));
+        
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(50));
+        assert!(elapsed < Duration::from_millis(100)); // Some tolerance
+    }
+
+    #[test]
+    fn timing_normalization_no_delay_if_already_slow() {
+        let err = AgentError::config(
+            definitions::CFG_PARSE_FAILED,
+            "test",
+            "test"
+        );
+        
+        // Wait longer than target
+        thread::sleep(Duration::from_millis(60));
+        
+        let start = Instant::now();
+        let _normalized = err.with_timing_normalization(Duration::from_millis(50));
+        let elapsed = start.elapsed();
+        
+        // Should not add extra delay
+        assert!(elapsed < Duration::from_millis(10));
+    }
+
+    #[test]
+    fn external_display_reveals_no_details() {
+        let err = AgentError::from_io_path(
+            definitions::IO_READ_FAILED,
+            "load_config",
+            "/etc/shadow",
+            io::Error::from(io::ErrorKind::PermissionDenied)
+        );
+        
+        let displayed = format!("{}", err);
+        
+        // Should not contain sensitive information
+        assert!(!displayed.contains("/etc"));
+        assert!(!displayed.contains("shadow"));
+        assert!(!displayed.contains("load_config"));
+        assert!(!displayed.contains("Permission"));
+        
+        // Should contain safe information
+        assert!(displayed.contains("I/O"));
+        assert!(displayed.contains("E-IO-800"));
+    }
+
+    #[test]
+    fn internal_log_contains_details() {
+        let err = AgentError::config(
+            definitions::CFG_PARSE_FAILED,
+            "test_operation",
+            "test details"
+        );
+        
+        let log = err.internal_log();
+        assert_eq!(log.operation(), "test_operation");
+        assert_eq!(log.details(), "test details");
+    }
+
+    #[test]
+    fn error_age_increases() {
+        let err = AgentError::config(
+            definitions::CFG_PARSE_FAILED,
+            "test",
+            "test"
+        );
+        
+        let age1 = err.age();
+        thread::sleep(Duration::from_millis(10));
+        let age2 = err.age();
+        
+        assert!(age2 > age1);
     }
 }

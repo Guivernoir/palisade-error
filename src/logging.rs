@@ -18,9 +18,13 @@
 
 use crate::{ContextField, ErrorCode};
 use std::fmt;
+use std::borrow::Cow;
 
 /// Maximum length for any individual field in formatted output (DoS prevention)
 const MAX_FIELD_OUTPUT_LEN: usize = 1024;
+
+/// Truncation indicator appended to truncated strings
+const TRUNCATION_INDICATOR: &str = "...[TRUNCATED]";
 
 /// Structured log entry with borrowed data from AgentError.
 ///
@@ -51,7 +55,8 @@ impl<'a> InternalLog<'a> {
     /// Format for human-readable logs in trusted debug contexts.
     /// 
     /// WARNING: This materializes sensitive data into a String.
-    /// This function is only available with the `trusted_debug` feature flag.
+    /// This function is only available with BOTH the `trusted_debug` feature flag
+    /// AND debug assertions enabled. This prevents accidental use in production.
     /// 
     /// Only use this in:
     /// - Local development debugging
@@ -62,26 +67,26 @@ impl<'a> InternalLog<'a> {
     /// - External-facing logs
     /// - Untrusted log aggregation
     /// - Production without proper sanitization pipeline
-    #[cfg(feature = "trusted_debug")]
+    #[cfg(all(feature = "trusted_debug", debug_assertions))]
     pub fn format_for_trusted_debug(&self) -> String {
         let mut output = format!(
             "[{}] {} operation='{}' details='{}'",
             self.code,
             if self.retryable { "[RETRYABLE]" } else { "" },
-            truncate_for_display(self.operation),
-            truncate_for_display(self.details)
+            truncate_with_indicator(self.operation),
+            truncate_with_indicator(self.details)
         );
 
         if let Some(internal) = self.source_internal {
-            output.push_str(&format!(" source='{}'", truncate_for_display(internal)));
+            output.push_str(&format!(" source='{}'", truncate_with_indicator(internal)));
         }
 
         if let Some(sensitive) = self.source_sensitive {
-            output.push_str(&format!(" sensitive='{}'", truncate_for_display(sensitive)));
+            output.push_str(&format!(" sensitive='{}'", truncate_with_indicator(sensitive)));
         }
 
         for (key, value) in self.metadata {
-            output.push_str(&format!(" {}='{}'", key, truncate_for_display(value.as_str())));
+            output.push_str(&format!(" {}='{}'", key, truncate_with_indicator(value.as_str())));
         }
 
         output
@@ -108,20 +113,20 @@ impl<'a> InternalLog<'a> {
             "[{}] {} operation='{}' details='{}'",
             self.code,
             if self.retryable { "[RETRYABLE]" } else { "" },
-            truncate_for_display(self.operation),
-            truncate_for_display(self.details)
+            truncate_with_indicator(self.operation),
+            truncate_with_indicator(self.details)
         )?;
 
         if let Some(internal) = self.source_internal {
-            write!(f, " source='{}'", truncate_for_display(internal))?;
+            write!(f, " source='{}'", truncate_with_indicator(internal))?;
         }
 
         if let Some(sensitive) = self.source_sensitive {
-            write!(f, " sensitive='{}'", truncate_for_display(sensitive))?;
+            write!(f, " sensitive='{}'", truncate_with_indicator(sensitive))?;
         }
 
         for (key, value) in self.metadata {
-            write!(f, " {}='{}'", key, truncate_for_display(value.as_str()))?;
+            write!(f, " {}='{}'", key, truncate_with_indicator(value.as_str()))?;
         }
 
         Ok(())
@@ -172,32 +177,109 @@ impl<'a> InternalLog<'a> {
 
 /// Truncate a string for display to prevent DoS via extremely long error messages.
 /// 
-/// If the string exceeds MAX_FIELD_OUTPUT_LEN, it's truncated with an indicator.
-/// This prevents memory exhaustion when formatting logs from untrusted input.
-#[inline]
-fn truncate_for_display(s: &str) -> &str {
+/// If the string exceeds MAX_FIELD_OUTPUT_LEN, it's truncated with an indicator
+/// to make the truncation visible to operators.
+/// 
+/// Returns a Cow<str> to avoid allocation when no truncation is needed.
+fn truncate_with_indicator(s: &str) -> Cow<'_, str> {
     if s.len() <= MAX_FIELD_OUTPUT_LEN {
-        s
-    } else {
-        // Safe: We're truncating at a byte boundary we control
-        &s[..MAX_FIELD_OUTPUT_LEN]
-        // Note: This may truncate mid-UTF8 character in pathological cases.
-        // For production, consider using a proper UTF-8 boundary check:
-        // s.char_indices().nth(MAX_FIELD_OUTPUT_LEN).map_or(s, |(idx, _)| &s[..idx])
+        return Cow::Borrowed(s);
     }
+    
+    // Reserve space for the truncation indicator
+    let max_content_len = MAX_FIELD_OUTPUT_LEN.saturating_sub(TRUNCATION_INDICATOR.len());
+    
+    // Find the last valid UTF-8 character boundary at or before the limit
+    let mut idx = max_content_len;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    
+    // If we couldn't find a boundary (pathological case), just use the indicator
+    if idx == 0 {
+        return Cow::Borrowed(TRUNCATION_INDICATOR);
+    }
+    
+    // Allocate a new string with the truncated content + indicator
+    let mut result = String::with_capacity(idx + TRUNCATION_INDICATOR.len());
+    result.push_str(&s[..idx]);
+    result.push_str(TRUNCATION_INDICATOR);
+    Cow::Owned(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    
     #[test]
-    fn test_truncation() {
-        let short = "short string";
-        assert_eq!(truncate_for_display(short), short);
-
-        let long = "a".repeat(MAX_FIELD_OUTPUT_LEN + 100);
-        let truncated = truncate_for_display(&long);
+    fn truncate_ascii() {
+        let s = "a".repeat(MAX_FIELD_OUTPUT_LEN + 10);
+        let truncated = truncate_with_indicator(&s);
+        
+        // Should be truncated
+        assert!(truncated.len() <= MAX_FIELD_OUTPUT_LEN);
+        
+        // Should contain truncation indicator
+        assert!(truncated.ends_with(TRUNCATION_INDICATOR));
+    }
+    
+    #[test]
+    fn no_truncate_when_under_limit() {
+        let s = "short string";
+        let truncated = truncate_with_indicator(s);
+        
+        // Should be borrowed (no allocation)
+        assert!(matches!(truncated, Cow::Borrowed(_)));
+        assert_eq!(truncated, s);
+    }
+    
+    #[test]
+    fn truncate_utf8_boundary() {
+        // Russian text: каждый символ занимает 2 байта
+        let s = "й".repeat(MAX_FIELD_OUTPUT_LEN);  // Each 'й' is 2 bytes
+        let truncated = truncate_with_indicator(&s);
+        
+        // Should not panic, should be valid UTF-8
+        let _ = truncated.to_string();
+        
+        // Length should be at most MAX_FIELD_OUTPUT_LEN
+        assert!(truncated.len() <= MAX_FIELD_OUTPUT_LEN);
+        
+        // Should end with truncation indicator
+        assert!(truncated.ends_with(TRUNCATION_INDICATOR));
+    }
+    
+    #[test]
+    fn truncate_emoji() {
+        let s = "🔥".repeat(MAX_FIELD_OUTPUT_LEN);  // Each emoji is 4 bytes
+        let truncated = truncate_with_indicator(&s);
+        
+        // Must remain valid UTF-8
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+        
+        // Should contain truncation indicator
+        assert!(truncated.ends_with(TRUNCATION_INDICATOR));
+    }
+    
+    #[test]
+    fn exactly_at_limit() {
+        let s = "a".repeat(MAX_FIELD_OUTPUT_LEN);
+        let truncated = truncate_with_indicator(&s);
+        
+        // Should NOT be truncated (exactly at limit)
+        assert!(matches!(truncated, Cow::Borrowed(_)));
         assert_eq!(truncated.len(), MAX_FIELD_OUTPUT_LEN);
+        assert!(!truncated.ends_with(TRUNCATION_INDICATOR));
+    }
+    
+    #[test]
+    fn one_over_limit() {
+        let s = "a".repeat(MAX_FIELD_OUTPUT_LEN + 1);
+        let truncated = truncate_with_indicator(&s);
+        
+        // Should be truncated
+        assert!(matches!(truncated, Cow::Owned(_)));
+        assert!(truncated.len() <= MAX_FIELD_OUTPUT_LEN);
+        assert!(truncated.ends_with(TRUNCATION_INDICATOR));
     }
 }

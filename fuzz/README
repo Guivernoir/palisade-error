@@ -1,0 +1,252 @@
+# Fuzzing Suite for Palisade Errors
+
+This directory contains fuzzing targets for testing the security and robustness of the error handling system.
+
+## Prerequisites
+
+Install cargo-fuzz:
+
+```bash
+cargo install cargo-fuzz
+```
+
+Note: Fuzzing requires a nightly Rust toolchain.
+
+```bash
+rustup install nightly
+```
+
+## Available Fuzz Targets
+
+### 1. `fuzz_error_creation`
+
+Tests basic error creation with arbitrary strings.
+
+**What it tests:**
+
+- Error constructors don't panic on any input
+- External display never leaks sensitive data
+- Memory is properly managed (no leaks)
+
+**Run:**
+
+```bash
+cargo +nightly fuzz run fuzz_error_creation
+```
+
+### 2. `fuzz_display_formatting`
+
+Tests Display and Debug formatting implementations.
+
+**What it tests:**
+
+- Formatting never panics
+- Output is always valid UTF-8
+- Sensitive data is never leaked
+- Output size is bounded (DoS prevention)
+
+**Run:**
+
+```bash
+cargo +nightly fuzz run fuzz_display_formatting
+```
+
+### 3. `fuzz_internal_log`
+
+Tests internal logging with arbitrary content.
+
+**What it tests:**
+
+- Internal log formatting handles any input
+- Truncation works correctly on UTF-8 boundaries
+- Memory usage is bounded
+- Structured field access doesn't panic
+
+**Run:**
+
+```bash
+cargo +nightly fuzz run fuzz_internal_log
+```
+
+### 4. `fuzz_metadata`
+
+Tests metadata handling with arbitrary key-value pairs.
+
+**What it tests:**
+
+- Multiple metadata entries don't cause issues
+- Metadata never leaks to external display
+- Internal logging properly includes metadata
+- Memory management with many metadata entries
+
+**Run:**
+
+```bash
+cargo +nightly fuzz run fuzz_metadata
+```
+
+### 5. `fuzz_io_error`
+
+Tests file path handling in I/O errors.
+
+**What it tests:**
+
+- Arbitrary paths don't cause panics
+- Paths never leak to external display
+- Unicode paths are handled correctly
+- Path separators and special characters work
+
+**Run:**
+
+```bash
+cargo +nightly fuzz run fuzz_io_error
+```
+
+## Running All Fuzz Targets
+
+```bash
+# Run each target for 60 seconds
+for target in fuzz_error_creation fuzz_display_formatting fuzz_internal_log fuzz_metadata fuzz_io_error; do
+    echo "Running $target..."
+    cargo +nightly fuzz run $target -- -max_total_time=60
+done
+```
+
+## Recommended Fuzzing Duration
+
+For thorough testing:
+
+```bash
+# Short test (good for CI):
+cargo +nightly fuzz run <target> -- -max_total_time=60 -runs=10000
+
+# Medium test (local development):
+cargo +nightly fuzz run <target> -- -max_total_time=300 -runs=100000
+
+# Long test (overnight):
+cargo +nightly fuzz run <target> -- -max_total_time=3600 -runs=1000000
+```
+
+## Corpus
+
+Fuzz targets automatically build a corpus of interesting inputs:
+
+```bash
+# View corpus
+ls fuzz/corpus/<target>/
+
+# Add seed inputs
+echo "interesting input" > fuzz/corpus/<target>/seed1
+```
+
+## Crash Analysis
+
+If fuzzing finds a crash:
+
+```bash
+# Crashes are saved in:
+fuzz/artifacts/<target>/
+
+# Reproduce a crash:
+cargo +nightly fuzz run <target> fuzz/artifacts/<target>/crash-<hash>
+
+# Debug a crash:
+cargo +nightly fuzz run --debug-assertions <target> fuzz/artifacts/<target>/crash-<hash>
+```
+
+## Coverage Analysis
+
+Generate coverage report:
+
+```bash
+# Run with coverage
+cargo +nightly fuzz coverage <target>
+
+# View coverage report
+cargo cov -- show target/x86_64-unknown-linux-gnu/release/<target> \
+    --format=html -instr-profile=fuzz/coverage/<target>/coverage.profdata \
+    > coverage.html
+```
+
+## Continuous Fuzzing
+
+For continuous fuzzing (recommended for security-critical projects):
+
+```bash
+# Run in background with AFL-style UI
+cargo +nightly fuzz run <target> -- -jobs=4 -workers=4
+```
+
+## Integration with CI/CD
+
+Example GitHub Actions workflow:
+
+```yaml
+name: Fuzzing
+on: [push, pull_request]
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+      - run: cargo install cargo-fuzz
+      - run: |
+          for target in fuzz_error_creation fuzz_display_formatting; do
+            cargo +nightly fuzz run $target -- -max_total_time=120 -runs=10000
+          done
+```
+
+## Security Properties Verified
+
+These fuzz targets verify the following security properties:
+
+1. **No panics**: System remains operational under any input
+2. **No information leakage**: Sensitive data never appears in external output
+3. **Bounded resources**: Memory and CPU usage is controlled
+4. **UTF-8 safety**: All string output is valid UTF-8
+5. **Proper zeroization**: Memory is cleared on drop (verified indirectly)
+
+## Common Issues
+
+### "undefined reference to `__llvm_profile_runtime`"
+
+This can happen with some setups. Try:
+
+```bash
+rustup component add llvm-tools-preview --toolchain nightly
+```
+
+### "failed to run custom build command"
+
+Make sure you're in the parent directory:
+
+```bash
+cd .. && cargo +nightly fuzz run <target>
+```
+
+### Fuzzing is slow
+
+Fuzzing is CPU-intensive. Use multiple cores:
+
+```bash
+cargo +nightly fuzz run <target> -- -jobs=$(nproc)
+```
+
+## Contributing
+
+When adding new functionality:
+
+1. Add a fuzz target if it handles untrusted input
+2. Run fuzzing for at least 5 minutes locally
+3. Add interesting test cases to the corpus
+4. Document what the target tests in this README
+
+## References
+
+- [cargo-fuzz documentation](https://rust-fuzz.github.io/book/cargo-fuzz.html)
+- [libFuzzer documentation](https://llvm.org/docs/LibFuzzer.html)
+- [Fuzzing best practices](https://rust-fuzz.github.io/book/introduction.html)
