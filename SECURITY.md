@@ -521,10 +521,10 @@ For maximum security posture:
 
 ## License
 
-This security policy is licensed under the same terms as the code: MIT OR Apache-2.0.
+This security policy is licensed under the same terms as the code: Apache-2.0.
 
 ---
 
-**Last Updated:** 01-06-2026  
+**Last Updated:** January 6th, 2026
 **Version:** 0.1.0  
 **Contact:** strukturaenterprise@gmail.com
