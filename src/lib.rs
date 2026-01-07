@@ -124,6 +124,9 @@ pub mod definitions;
 pub mod logging;
 pub mod models;
 pub mod tests;
+#[cfg(feature = "obfuscate-codes")]
+pub mod obfuscation;
+pub mod ring_buffer;
 
 pub use codes::*;
 pub use context::*;
@@ -131,6 +134,9 @@ pub use convenience::*;
 pub use definitions::*;
 pub use logging::*;
 pub use models::*;
+#[cfg(feature = "obfuscate-codes")]
+pub use obfuscation::*;
+pub use ring_buffer::*;
 
 /// Type alias for Results using our error type.
 pub type Result<T> = result::Result<T, AgentError>;
@@ -508,6 +514,84 @@ impl AgentError {
             format!("{:?}", error.kind()),  // Internal: error kind
             path.into(),                // Sensitive: filesystem path
         )
+    }
+
+    /// Async-safe timing normalization for non-blocking contexts.
+    ///
+    /// Unlike `with_timing_normalization`, this uses async sleep primitives
+    /// and won't block the executor thread. Essential for Tokio/async-std runtimes.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// async fn authenticate(user: &str, pass: &str) -> Result<Session> {
+    ///     let result = check_credentials(user, pass).await;
+    ///     
+    ///     if let Err(e) = result {
+    ///         // Normalize timing without blocking executor
+    ///         return Err(
+    ///             e.with_timing_normalization_async(Duration::from_millis(100)).await
+    ///         );
+    ///     }
+    ///     
+    ///     result
+    /// }
+    /// ```
+    ///
+    /// # Runtime Support
+    ///
+    /// - Requires either `tokio` or `async-std` feature
+    /// - Tokio takes precedence if both are enabled
+    /// - Will not compile without at least one async runtime feature
+    #[cfg(any(feature = "tokio", feature = "async-std"))]
+    #[inline]
+    pub async fn with_timing_normalization_async(self, target_duration: Duration) -> Self {
+        let elapsed = self.created_at.elapsed();
+        if elapsed < target_duration {
+            let sleep_duration = target_duration - elapsed;
+            
+            #[cfg(feature = "tokio")]
+            tokio::time::sleep(sleep_duration).await;
+            
+            #[cfg(all(feature = "async-std", not(feature = "tokio")))]
+            async_std::task::sleep(sleep_duration).await;
+        }
+        self
+    }
+
+    /// Apply error code obfuscation if enabled via feature flag.
+    ///
+    /// This mutates the error's code to add a session-specific offset,
+    /// making fingerprinting harder while preserving internal semantics.
+    ///
+    /// Only has effect when `obfuscate-codes` feature is enabled.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use palisade_errors::{AgentError, definitions, obfuscation};
+    ///
+    /// // Initialize session-specific salt
+    /// obfuscation::init_session_salt(request.session_id);
+    ///
+    /// let err = AgentError::config(definitions::CFG_PARSE_FAILED, "op", "details")
+    ///     .with_obfuscation();
+    ///
+    /// // External display now shows E-CFG-103 instead of E-CFG-100
+    /// // (assuming salt was 3)
+    /// ```
+    #[cfg(feature = "obfuscate-codes")]
+    #[inline]
+    pub fn with_obfuscation(mut self) -> Self {
+        self.code = crate::obfuscation::obfuscate_code(self.code);
+        self
+    }
+
+    /// No-op when obfuscation is disabled. Allows code to remain agnostic.
+    #[cfg(not(feature = "obfuscate-codes"))]
+    #[inline]
+    pub fn with_obfuscation(self) -> Self {
+        self
     }
 }
 

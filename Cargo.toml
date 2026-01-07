@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Guilherme F. G. Santos <strukturaenterprise@gmail.com>"]
 description = "Security-conscious error handling with operational security principles"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 repository = "https://github.com/guivernoir/palisade_errors"
 documentation = "https://docs.rs/palisade_errors"
 readme = "README.md"
@@ -12,7 +12,14 @@ keywords = ["error", "security", "zeroize", "opsec", "forensics"]
 categories = ["development-tools::debugging", "cryptography"]
 
 [dependencies]
+async-std = { version = "1.13.2", optional = true }
 smallvec = "1.15.1"
+tokio = { version = "1.49.0", features = [
+    "time",
+    "rt",
+    "macros",
+    "rt-multi-thread",
+], optional = true }
 zeroize = { version = "1.7", features = ["derive"] }
 
 [dev-dependencies]
@@ -27,10 +34,16 @@ default = []
 trusted_debug = []
 # Reserved for future external signaling capabilities
 external_signaling = []
+# Async timing normalization support
+tokio = ["dep:tokio"]
+async-std = ["dep:async-std"]
+# Error code obfuscation for paranoid deployments
+obfuscate-codes = []
 
 # ============================================================================
 # EXAMPLES
 # ============================================================================
+
 
 [[example]]
 name = "basic_usage"
@@ -47,6 +60,20 @@ path = "examples/honeypot_pipeline.rs"
 [[example]]
 name = "logging"
 path = "examples/production_logging.rs"
+
+[[example]]
+name = "ring_buffer_demo"
+path = "examples/ring_buffer_demo.rs"
+
+[[example]]
+name = "async_timing"
+path = "examples/async_timing.rs"
+required-features = ["tokio"]
+
+[[example]]
+name = "obfuscation_demo"
+path = "examples/obfuscation_demo.rs"
+required-features = ["obfuscate-codes"]
 
 # ============================================================================
 # BENCHMARKS
