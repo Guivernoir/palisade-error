@@ -203,12 +203,11 @@ mod error_context {
         let mut ctx = ErrorContext::new("op", "details");
         ctx.add_metadata("key", "value");
         
-        let cloned = ctx.clone();
-        match &cloned.operation {
+        match &ctx.operation {
             ContextField::Internal(s) => assert_eq!(s.as_ref(), "op"),
             _ => panic!("Expected Internal field"),
         }
-        assert_eq!(cloned.metadata.len(), 1);
+        assert_eq!(ctx.metadata.len(), 1);
     }
 
     #[test]

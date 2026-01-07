@@ -87,18 +87,6 @@ impl Drop for ErrorContext {
     }
 }
 
-impl Clone for ErrorContext {
-    fn clone(&self) -> Self {
-        Self {
-            operation: self.operation.clone(),
-            details: self.details.clone(),
-            source_internal: self.source_internal.clone(),
-            source_sensitive: self.source_sensitive.clone(),
-            metadata: self.metadata.clone(),
-        }
-    }
-}
-
 impl ErrorContext {
     pub fn new(
         operation: impl Into<Cow<'static, str>>, 
