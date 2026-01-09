@@ -546,9 +546,12 @@ impl AgentError {
     #[cfg(any(feature = "tokio", feature = "async-std"))]
     #[inline]
     pub async fn with_timing_normalization_async(self, target_duration: Duration) -> Self {
-        let elapsed = self.created_at.elapsed();
-        if elapsed < target_duration {
-            let sleep_duration = target_duration - elapsed;
+        // FIXED: Calculate target absolute time to avoid race conditions
+        let target_time = self.created_at + target_duration;
+        let now = Instant::now();
+        
+        if now < target_time {
+            let sleep_duration = target_time - now;
             
             #[cfg(feature = "tokio")]
             tokio::time::sleep(sleep_duration).await;

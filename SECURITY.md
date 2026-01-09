@@ -198,34 +198,135 @@ Benchmarked on Dell Latitude E6410 (Intel Core i5 M560 @ 2.66GHz, 2010-era hardw
 ### Error Creation Performance
 
 ```
-Simple error:              218 ns  (4.5M errors/sec)
-Dynamic string:            265 ns  (3.8M errors/sec)
-Sensitive context:         220 ns  (4.5M errors/sec)
-I/O with split sources:    377 ns  (2.6M errors/sec)
+Simple error:              209 ns  (4.8M errors/sec)
+Dynamic string:            253 ns  (3.9M errors/sec)
+Sensitive context:         224 ns  (4.5M errors/sec)
+I/O with split sources:    359 ns  (2.8M errors/sec)
+```
+
+### Constructor Performance by Category
+
+```
+Config error:              210 ns  (4.8M/sec)
+Deployment error:          216 ns  (4.6M/sec)
+Telemetry error:          214 ns  (4.7M/sec)
+Correlation error:         245 ns  (4.1M/sec)
+Response error:            218 ns  (4.6M/sec)
+Logging error:             218 ns  (4.6M/sec)
+Platform error:            218 ns  (4.6M/sec)
+I/O operation:             220 ns  (4.5M/sec)
 ```
 
 ### Logging Performance
 
 ```
-Log access:                 57 ns  (17.5M ops/sec)
-Log write to buffer:       709 ns  (1.4M ops/sec)
-Callback pattern:           33 ns  (30M ops/sec)
+Log access:                 59 ns  (16.9M ops/sec)
+Log write to buffer:       673 ns  (1.5M ops/sec)
+Callback pattern:           30 ns  (33.3M ops/sec)
+With sensitive data:       564 ns  (1.8M ops/sec)
+```
+
+### Metadata Operations
+
+```
+1 metadata entry:          326 ns  (3.1M ops/sec) - inline storage
+2 metadata entries:        404 ns  (2.5M ops/sec) - inline storage
+4 metadata entries:        527 ns  (1.9M ops/sec) - inline storage
+8 metadata entries:      1,169 ns  (855k ops/sec) - heap allocation
+
+Metadata access (any):   1.06 ns  (943M ops/sec)
+```
+
+### Log Truncation
+
+```
+100 chars:                 556 ns
+1024 chars (limit):        859 ns
+5000 chars (truncated):    915 ns
+10000 chars (truncated):   908 ns
+```
+
+### Display & Formatting
+
+```
+External display format:   316 ns  (3.2M ops/sec)
+Debug format:            1,087 ns  (920k ops/sec)
+Error code to string:      124 ns  (8.1M ops/sec)
 ```
 
 ### Honeypot Scenarios
 
 ```
-Auth failure (full):      1.41 µs  (709k/sec)
-Path traversal:           1.27 µs  (787k/sec)
-Rate limit response:       576 ns  (1.7M/sec)
+Auth failure (full):      1.39 µs  (719k/sec)
+Path traversal:           1.23 µs  (813k/sec)
+Rate limit response:       540 ns  (1.9M/sec)
 ```
 
 ### Attack Burst Handling
 
 ```
-10 errors:               8.8 µs   (113k bursts/sec)
-100 errors:             100 µs    (10k bursts/sec)
-500 errors:             464 µs    (2.1k bursts/sec)
+10 errors:               8.79 µs   (114k bursts/sec)
+50 errors:               45.7 µs   (21.9k bursts/sec)
+100 errors:              86.6 µs   (11.5k bursts/sec)
+500 errors:               446 µs   (2.2k bursts/sec)
+```
+
+### Timing Normalization
+
+```
+Fast error with norm:    10.13 ms  (normalized to 10ms)
+Slow error with norm:    15.15 ms  (normalized to 15ms)
+Measurement overhead:      162 ns  (negligible)
+```
+
+### Obfuscation Feature (when enabled)
+
+```
+Initialize session salt:  352 ps  (2.8T ops/sec)
+Obfuscate error code:      14 ns  (71.4M ops/sec)
+Generate random salt:      72 ns  (13.9M ops/sec)
+Error with obfuscation:   243 ns  (4.1M errors/sec)
+```
+
+### Ring Buffer Performance
+
+```
+Single-threaded (100):     421 ns
+Single-threaded (1000):    428 ns
+Single-threaded (10000):   464 ns
+
+Concurrent (2 threads):    470 µs
+Concurrent (4 threads):    781 µs
+Concurrent (8 threads):  1,567 µs
+
+With eviction (200):     99.8 µs
+Get recent 10:          4.91 µs
+Get all (200 entries):   256 µs
+Get filtered:            120 µs
+```
+
+### Memory Allocation
+
+```
+Static strings:            170 ns  (zero allocation)
+Dynamic strings:           239 ns  (heap allocation)
+```
+
+### Unicode Handling
+
+```
+ASCII text:                207 ns
+Emoji:                     207 ns
+Mixed scripts:             213 ns
+```
+
+### Method Chaining
+
+```
+No chaining:               210 ns
+With retry context:        218 ns
+With 5 metadata entries:   359 ns
+Full chain:                277 ns
 ```
 
 ### Capacity Analysis
@@ -239,8 +340,8 @@ Rate limit response:       576 ns  (1.7M/sec)
 
 **Library capacity on E6410 (worst case - auth failure scenario):**
 
-- Single-threaded: 709,000 errors/sec
-- **Safety margin:** 142x @ 5,000 errors/sec
+- Single-threaded: 719,000 errors/sec
+- **Safety margin:** 144x @ 5,000 errors/sec
 - **CPU overhead:** <0.7% @ 5,000 errors/sec
 
 **On modern hardware (Ryzen 9, M-series Apple Silicon):**
@@ -311,13 +412,16 @@ E-CFG-102 → Validator, type mismatch
 
 **Measured:**
 
-- 1-4 entries: ~320-550ns (inline)
-- 8 entries: ~1,090ns (heap allocation)
+- 1 entry: 326ns (inline storage)
+- 2 entries: 404ns (inline storage)
+- 4 entries: 527ns (inline storage)
+- 8 entries: 1,169ns (heap allocation, 2.2x slower)
 
 **Mitigation:**
 
-- Keep critical paths to <4 metadata entries
+- Keep critical paths to ≤4 metadata entries
 - Not a concern for typical honeypot use (most errors have 2-3 metadata)
+- Even with 8 entries, still processing 855k errors/sec
 
 ### 5. Async Contexts with Timing Normalization
 
@@ -350,6 +454,17 @@ Before deploying in production:
   # Expected: "All heap blocks were freed -- no leaks are possible"
   ```
 
+- [ ] **Fuzz Testing**
+
+  ```bash
+  # Requires Rust nightly toolchain
+  rustup install nightly
+
+  # Run all fuzz targets for 5 minutes each
+  ./run_fuzz.sh all 300
+  # Check fuzz/artifacts/ for any crashes
+  ```
+
 - [ ] **Timing Normalization Test**
 
   ```bash
@@ -372,9 +487,16 @@ Before deploying in production:
   ```
 
 - [ ] **Forensic Log Completeness**
+
   ```bash
   cargo run --example honeypot_pipeline | grep "FORENSIC LOG"
   # Verify all necessary context captured
+  ```
+
+- [ ] **Comprehensive Test Suite**
+  ```bash
+  ./run_all_tests.sh
+  # Run all tests, examples, and quality checks
   ```
 
 ## Deployment Best Practices
@@ -525,6 +647,6 @@ This security policy is licensed under the same terms as the code: Apache-2.0.
 
 ---
 
-**Last Updated:** January 6th, 2026
-**Version:** 0.1.0  
+**Last Updated:** January 9th, 2026
+**Version:** 0.2.0  
 **Contact:** strukturaenterprise@gmail.com

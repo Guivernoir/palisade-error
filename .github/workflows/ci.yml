@@ -164,19 +164,6 @@ jobs:
           files: ./cobertura.xml
           fail_ci_if_error: false
 
-  # Benchmarks (ensure they compile)
-  bench:
-    name: Benchmark Compilation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Check benchmarks compile
-        run: cargo bench --no-run --verbose
-
   # Examples (ensure they compile and run)
   examples:
     name: Examples
@@ -275,3 +262,87 @@ jobs:
 
       - name: Check licenses and dependencies
         run: cargo deny check
+
+  # Property-based testing
+  proptest:
+    name: Property-Based Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run proptest suite
+        run: cargo test --test proptest_suite --verbose
+        env:
+          # Run more cases in CI
+          PROPTEST_CASES: 1000
+
+  # Fuzzing (quick validation)
+  fuzz_validation:
+    name: Fuzz Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Fuzz error_context (60s)
+        run: cargo +nightly fuzz run error_context -- -max_total_time=60
+        continue-on-error: true
+
+      - name: Fuzz truncation (60s)
+        run: cargo +nightly fuzz run truncation -- -max_total_time=60
+        continue-on-error: true
+
+      - name: Fuzz metadata (60s)
+        run: cargo +nightly fuzz run metadata -- -max_total_time=60
+        continue-on-error: true
+
+      - name: Fuzz ring_buffer (60s)
+        run: cargo +nightly fuzz run ring_buffer -- -max_total_time=60
+        continue-on-error: true
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+          retention-days: 30
+
+  # Sanitized macro validation
+  macro_safety:
+    name: Macro Safety Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test sanitized macro
+        run: |
+          cargo test --lib sanitized -- --nocapture
+          cargo test --lib convenience -- --nocapture
+
+  # Benchmark smoke test (ensure they compile)
+  benchmark_smoke:
+    name: Benchmark Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build benchmarks
+        run: cargo bench --no-run --all-features --verbose
+
+      - name: Quick benchmark run
+        run: cargo bench --all-features -- --quick

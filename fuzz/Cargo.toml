@@ -1,0 +1,33 @@
+[package]
+name = "palisade_errors-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+palisade_errors = { path = ".." }
+
+[[bin]]
+name = "truncation"
+path = "fuzz_targets/truncation.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "metadata"
+path = "fuzz_targets/metadata.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ring_buffer"
+path = "fuzz_targets/ring_buffer.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1

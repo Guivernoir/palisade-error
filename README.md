@@ -28,19 +28,54 @@ Palisade Errors ensures attackers see only walls, while defenders see everything
 
 Benchmarked on Dell Latitude E6410 (Intel Core i5 M560 @ 2.66GHz, circa 2010):
 
-| Operation                    | Time  | Honeypot Capacity |
-| ---------------------------- | ----- | ----------------- |
-| Simple error creation        | 218ns | 4.5M errors/sec   |
-| Auth failure (full pipeline) | 1.4μs | 714k/sec          |
-| Path traversal detection     | 1.3μs | 769k/sec          |
-| 100-error burst              | 100μs | 10k bursts/sec    |
-| Rate limit response          | 576ns | 1.7M/sec          |
+### Core Operations
+
+| Operation                | Time  | Honeypot Capacity |
+| ------------------------ | ----- | ----------------- |
+| Simple error creation    | 209ns | 4.8M errors/sec   |
+| Dynamic string error     | 253ns | 3.9M errors/sec   |
+| Sensitive context error  | 224ns | 4.5M errors/sec   |
+| I/O error (split source) | 359ns | 2.8M errors/sec   |
+
+### Logging Performance
+
+| Operation                | Time  | Throughput    |
+| ------------------------ | ----- | ------------- |
+| Internal log access      | 59ns  | 16.9M ops/sec |
+| Log write to buffer      | 673ns | 1.5M ops/sec  |
+| Callback logging pattern | 30ns  | 33.3M ops/sec |
+
+### Honeypot Scenarios
+
+| Scenario                     | Time   | Capacity |
+| ---------------------------- | ------ | -------- |
+| Auth failure (full pipeline) | 1.39μs | 719k/sec |
+| Path traversal detection     | 1.23μs | 813k/sec |
+| Rate limit response          | 540ns  | 1.9M/sec |
+
+### Attack Burst Handling
+
+| Burst Size | Time   | Bursts/sec |
+| ---------- | ------ | ---------- |
+| 10 errors  | 8.8μs  | 114k/sec   |
+| 50 errors  | 45.7μs | 21.9k/sec  |
+| 100 errors | 86.6μs | 11.5k/sec  |
+| 500 errors | 446μs  | 2.2k/sec   |
+
+### Metadata Performance
+
+| Entries   | Time   | Impact          |
+| --------- | ------ | --------------- |
+| 1 entry   | 326ns  | Inline storage  |
+| 2 entries | 404ns  | Inline storage  |
+| 4 entries | 527ns  | Inline storage  |
+| 8 entries | 1.17μs | Heap allocation |
 
 **Typical honeypot load:** 1,000-5,000 errors/second during coordinated attacks
 
-**Safety margin:** 100-700x on 15-year-old hardware
+**Safety margin:** 140-800x on 15-year-old hardware
 
-**CPU overhead at 5,000 errors/sec:** <1% (estimated 7ms CPU time)
+**CPU overhead at 5,000 errors/sec:** <0.7% (estimated 5ms CPU time)
 
 On modern hardware (Ryzen 9, M-series), expect 3-5x better performance.
 
@@ -153,6 +188,67 @@ The `honeypot_pipeline` example demonstrates:
 - DoS attempt correlation
 - Multi-tier forensic logging
 - Attack intelligence generation
+
+## 🔧 Running Scripts
+
+Convenient scripts are provided for comprehensive testing, benchmarking, and fuzzing:
+
+### Test Suite
+
+```bash
+# Run all tests with multiple feature combinations
+./run_all_tests.sh
+```
+
+This script runs:
+
+- Standard unit tests with all feature combinations
+- Property-based tests (proptest)
+- All examples to verify compilation and execution
+- Code quality checks (Clippy, formatting)
+- Documentation build verification
+
+### Benchmarking
+
+```bash
+# Run comprehensive performance benchmarks
+./run_benchmarks.sh
+```
+
+Generates detailed performance reports in `target/criterion/report/index.html` covering:
+
+- Error creation patterns
+- Logging performance
+- Honeypot scenarios
+- Attack burst handling
+- Metadata operations
+- Timing normalization
+- Ring buffer performance
+
+### Fuzz Testing
+
+**Note:** Fuzz testing requires Rust nightly toolchain. Install with:
+
+```bash
+rustup install nightly
+```
+
+```bash
+# Run all fuzz targets for 60 seconds each (uses nightly automatically)
+./run_fuzz.sh all 60
+
+# Run specific fuzz target
+./run_fuzz.sh error_context 300
+
+# Available targets: error_context, truncation, metadata, ring_buffer
+```
+
+Fuzz testing targets:
+
+- **error_context**: Tests arbitrary error construction and context handling
+- **truncation**: Validates log truncation with extreme input sizes
+- **metadata**: Stress-tests metadata storage with random key-value pairs
+- **ring_buffer**: Verifies concurrent ring buffer operations under load
 
 ## 🛡️ Security Properties
 
@@ -320,6 +416,9 @@ cargo bench attack_burst        # Burst simulation
 # All tests
 cargo test
 
+# Run comprehensive test suite
+./run_all_tests.sh
+
 # With coverage
 cargo install cargo-tarpaulin
 cargo tarpaulin --out Html --output-dir coverage/
@@ -327,9 +426,25 @@ cargo tarpaulin --out Html --output-dir coverage/
 # Memory leak verification
 cargo install cargo-valgrind
 cargo valgrind test --release
+
+# Fuzz testing (requires cargo-fuzz)
+./run_fuzz.sh all 60
 ```
 
-Expected: **Zero leaks** (all memory zeroized on drop)
+**Test Coverage:**
+
+- Unit tests for all error types and operations
+- Property-based testing (proptest) for invariants
+- Integration tests for honeypot scenarios
+- Fuzz testing for robustness against malformed inputs
+- Memory leak verification (expected: **zero leaks**)
+
+**Fuzz Testing Targets:**
+
+- Error context construction with arbitrary data
+- Log truncation boundary conditions
+- Metadata storage stress testing
+- Ring buffer concurrent operations
 
 ## 🎯 Use Cases
 

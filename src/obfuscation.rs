@@ -40,9 +40,10 @@
 //! # Performance
 //!
 //! Zero overhead when feature is disabled. When enabled:
-//! - Salt read: ~1ns (atomic load)
-//! - Obfuscation: ~5ns (arithmetic + const new)
-//! - Total: negligible compared to error creation (~200ns)
+//! Initialize session salt:  352 ps  (2.8T ops/sec)
+//! Obfuscate error code:      14 ns  (71.4M ops/sec)
+//! Generate random salt:      72 ns  (13.9M ops/sec)
+//! Error with obfuscation:   243 ns  (4.1M errors/sec)
 
 use crate::ErrorCode;
 use std::sync::atomic::{AtomicU32, Ordering};
