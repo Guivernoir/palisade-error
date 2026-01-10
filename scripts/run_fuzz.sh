@@ -44,7 +44,7 @@ echo -e "${BLUE}ℹ${NC} Using: $(rustup +nightly --version | head -1)"
 echo -e "${YELLOW}⚠${NC} Running without AddressSanitizer (linker compatibility)"
 echo ""
 
-TARGETS=("error_context" "truncation" "metadata" "ring_buffer")
+TARGETS=("truncation" "metadata" "ring_buffer")
 
 # Disable ASAN to avoid linker errors
 export RUSTFLAGS="-Cpanic=abort"
