@@ -72,7 +72,10 @@ pub const CFG_PARSE_FAILED: ErrorCode = ErrorCode::new("CFG", 100, OperationCate
 pub const CFG_VALIDATION_FAILED: ErrorCode = ErrorCode::new("CFG", 101, OperationCategory::Configuration);
 pub const CFG_MISSING_REQUIRED: ErrorCode = ErrorCode::new("CFG", 102, OperationCategory::Configuration);
 pub const CFG_INVALID_VALUE: ErrorCode = ErrorCode::new("CFG", 103, OperationCategory::Configuration);
-pub const CFG_PERMISSION_DENIED: ErrorCode = ErrorCode::new("CFG", 104, OperationCategory::Configuration);
+pub const CFG_INVALID_FORMAT: ErrorCode = ErrorCode::new("CFG", 104, OperationCategory::Configuration);
+pub const CFG_PERMISSION_DENIED: ErrorCode = ErrorCode::new("CFG", 105, OperationCategory::Configuration);
+pub const CFG_VERSION_MISMATCH: ErrorCode = ErrorCode::new("CFG", 106, OperationCategory::Configuration);
+pub const CFG_SECURITY_VIOLATION: ErrorCode = ErrorCode::new("CFG", 107, OperationCategory::Configuration);
 
 // Deception Subsystem Errors (200-299)
 pub const DCP_DEPLOY_FAILED: ErrorCode = ErrorCode::new("DCP", 200, OperationCategory::Deployment);
@@ -119,3 +122,4 @@ pub const IO_WRITE_FAILED: ErrorCode = ErrorCode::new("IO", 801, OperationCatego
 pub const IO_NETWORK_ERROR: ErrorCode = ErrorCode::new("IO", 802, OperationCategory::IO);
 pub const IO_TIMEOUT: ErrorCode = ErrorCode::new("IO", 803, OperationCategory::IO);
 pub const IO_NOT_FOUND: ErrorCode = ErrorCode::new("IO", 804, OperationCategory::IO);
+pub const IO_METADATA_FAILED: ErrorCode = ErrorCode::new("IO", 805, OperationCategory::IO);
