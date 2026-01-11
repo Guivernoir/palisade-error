@@ -124,7 +124,7 @@ pub mod definitions;
 pub mod logging;
 pub mod models;
 pub mod tests;
-#[cfg(feature = "obfuscate-codes")]
+#[cfg(feature = "obfuscate_codes")]
 pub mod obfuscation;
 pub mod ring_buffer;
 
@@ -134,7 +134,7 @@ pub use convenience::*;
 pub use definitions::*;
 pub use logging::*;
 pub use models::*;
-#[cfg(feature = "obfuscate-codes")]
+#[cfg(feature = "obfuscate_codes")]
 pub use obfuscation::*;
 pub use ring_buffer::*;
 
@@ -543,7 +543,7 @@ impl AgentError {
     /// - Requires either `tokio` or `async-std` feature
     /// - Tokio takes precedence if both are enabled
     /// - Will not compile without at least one async runtime feature
-    #[cfg(any(feature = "tokio", feature = "async-std"))]
+    #[cfg(any(feature = "tokio", feature = "async_std"))]
     #[inline]
     pub async fn with_timing_normalization_async(self, target_duration: Duration) -> Self {
         // FIXED: Calculate target absolute time to avoid race conditions
@@ -556,7 +556,7 @@ impl AgentError {
             #[cfg(feature = "tokio")]
             tokio::time::sleep(sleep_duration).await;
             
-            #[cfg(all(feature = "async-std", not(feature = "tokio")))]
+            #[cfg(all(feature = "async_std", not(feature = "tokio")))]
             async_std::task::sleep(sleep_duration).await;
         }
         self
@@ -583,7 +583,7 @@ impl AgentError {
     /// // External display now shows E-CFG-103 instead of E-CFG-100
     /// // (assuming salt was 3)
     /// ```
-    #[cfg(feature = "obfuscate-codes")]
+    #[cfg(feature = "obfuscate_codes")]
     #[inline]
     pub fn with_obfuscation(mut self) -> Self {
         self.code = crate::obfuscation::obfuscate_code(self.code);
@@ -591,7 +591,7 @@ impl AgentError {
     }
 
     /// No-op when obfuscation is disabled. Allows code to remain agnostic.
-    #[cfg(not(feature = "obfuscate-codes"))]
+    #[cfg(not(feature = "obfuscate_codes"))]
     #[inline]
     pub fn with_obfuscation(self) -> Self {
         self
