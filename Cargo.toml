@@ -1,6 +1,6 @@
 [package]
 name = "palisade_errors"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors = ["Guilherme F. G. Santos <strukturaenterprise@gmail.com>"]
 description = "Security-conscious error handling with operational security principles"
@@ -37,9 +37,9 @@ trusted_debug = []
 external_signaling = []
 # Async timing normalization support
 tokio = ["dep:tokio"]
-async-std = ["dep:async-std"]
+async_std = ["dep:async-std"]
 # Error code obfuscation for paranoid deployments
-obfuscate-codes = []
+obfuscate_codes = []
 
 # ============================================================================
 # EXAMPLES
