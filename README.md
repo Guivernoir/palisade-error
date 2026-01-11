@@ -238,14 +238,13 @@ rustup install nightly
 ./run_fuzz.sh all 60
 
 # Run specific fuzz target
-./run_fuzz.sh error_context 300
+./run_fuzz.sh truncation 300
 
 # Available targets: error_context, truncation, metadata, ring_buffer
 ```
 
 Fuzz testing targets:
 
-- **error_context**: Tests arbitrary error construction and context handling
 - **truncation**: Validates log truncation with extreme input sizes
 - **metadata**: Stress-tests metadata storage with random key-value pairs
 - **ring_buffer**: Verifies concurrent ring buffer operations under load
@@ -441,7 +440,6 @@ cargo valgrind test --release
 
 **Fuzz Testing Targets:**
 
-- Error context construction with arbitrary data
 - Log truncation boundary conditions
 - Metadata storage stress testing
 - Ring buffer concurrent operations
