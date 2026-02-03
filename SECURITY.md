@@ -27,13 +27,13 @@ This library is built for **honeypot systems** where EVERY error is intelligence
 
 We validate security performance using high-fidelity benchmarks on constrained hardware to ensure security mechanisms (like timing normalization) do not introduce denial-of-service vectors or side-channels.
 
-👉 **Please refer to [bench_avg.md](bench_avg.md) for detailed analysis of timing normalization, memory efficiency, and burst handling.**
+👉 **Please refer to [BENCH_AVG.md](BENCH_AVG.md) for detailed analysis of timing normalization, memory efficiency, and burst handling.**
 
 ## Error Code Governance
 
 Strict governance of error codes and namespaces is critical to preventing information leakage through taxonomy drift.
 
-👉 **Please refer to [error-governance.md](error-governance.md) for the security rules regarding namespace authorities, strict taxonomy features (`strict_taxonomy`), and severity enforcement (`strict_severity`).**
+👉 **Please refer to [ERROR_GOVERNANCE.md](ERROR_GOVERNANCE.md) for the security rules regarding namespace authorities, strict taxonomy features (`strict_taxonomy`), and severity enforcement (`strict_severity`).**
 
 ## What This Library Protects Against
 

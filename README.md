@@ -32,13 +32,13 @@ Palisade Errors ensures attackers see only walls, while defenders see everything
 
 To maintain security boundaries in large-scale systems, this crate adheres to a strict governance contract regarding error namespaces, impact scores, and authority flags.
 
-👉 **Please refer to [error-governance.md](error-governance.md) for the complete taxonomy rules, authority models, and strict-mode feature flags.**
+👉 **Please refer to [ERROR_GOVERNANCE.md](ERROR_GOVERNANCE.md) for the complete taxonomy rules, authority models, and strict-mode feature flags.**
 
 ## ⚡ Performance
 
 This crate is architected for **zero-leak memory management** and **microsecond-level predictability**, even on legacy hardware.
 
-👉 **For detailed benchmarks, timing normalization analysis, and hardware validation, see [bench_avg.md](bench_avg.md).**
+👉 **For detailed benchmarks, timing normalization analysis, and hardware validation, see [BENCH_AVG.md](BENCH_AVG.md).**
 
 ## 📖 Usage
 
