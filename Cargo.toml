@@ -1,0 +1,94 @@
+[package]
+name = "palisade-errors"
+version = "0.3.0"
+edition = "2024"
+authors = ["Guilherme F. G. Santos <strukturaenterprise@gmail.com>"]
+description = "Security-conscious error handling with operational security principles"
+license = "Apache-2.0"
+repository = "https://github.com/guivernoir/palisade-errors"
+documentation = "https://docs.rs/palisade_errors"
+readme = "README.md"
+keywords = ["error", "security", "zeroize", "opsec", "forensics"]
+categories = ["development-tools::debugging", "cryptography"]
+
+[dependencies]
+async-std = { version = "1.13.2", optional = true }
+smallvec = "1.15.1"
+tokio = { version = "1.49.0", features = [
+    "time",
+    "rt",
+    "macros",
+    "rt-multi-thread",
+], optional = true }
+zeroize = { version = "1.7", features = ["derive"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+chrono = "0.4.42"
+md5 = "0.8.0"
+serde_json = "1.0.149"
+proptest = "1.5"
+stats_alloc = "0.1.10"
+
+[features]
+default = []
+# Enable detailed debug formatting for trusted environments only
+trusted_debug = []
+# Reserved for future external signaling capabilities
+external_signaling = []
+# Async timing normalization support
+tokio = ["dep:tokio"]
+async_std = ["dep:async-std"]
+strict_taxonomy = []
+strict_severity = []
+
+# ============================================================================
+# EXAMPLES
+# ============================================================================
+
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[example]]
+name = "forensic_logging"
+path = "examples/forensic_logging.rs"
+
+[[example]]
+name = "honeypot_scenario"
+path = "examples/honeypot_scenario.rs"
+
+[[example]]
+name = "secure_macros"
+path = "examples/secure_macros.rs"
+
+# ============================================================================
+# BENCHMARKS
+# ============================================================================
+
+[[bench]]
+name = "error_performance"
+harness = false
+
+# ============================================================================
+# TESTS
+# ============================================================================
+
+[[test]]
+name = "proptest_suite"
+path = "tests/proptest_suite.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# ============================================================================
+# PROFILE CONFIGURATIONS
+# ============================================================================
+
+[profile.bench]
+# Optimize for performance during benchmarks
+opt-level = 3
+lto = true
+codegen-units = 1

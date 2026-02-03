@@ -1,0 +1,35 @@
+Cargo.lock
+target/
+y/
+
+# Fuzzing artifacts
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/coverage/
+
+# Proptest regressions 
+proptest-regressions/
+*.proptest-regressions
+
+# Benchmark results 
+# target/criterion/
+
+# Coverage reports
+coverage/
+cobertura.xml
+tarpaulin-report.html
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
