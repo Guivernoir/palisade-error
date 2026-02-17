@@ -188,8 +188,8 @@ impl Drop for InternalContextField {
         // This is best-effort memory clearing for defense against casual inspection
         // and compiler optimizations. Not suitable for cryptographic key material
         // that requires HSM-grade wiping.
-        if let Self::Sensitive(cow) = &mut *self {
-            if let Cow::Owned(s) = cow {
+        if let Self::Sensitive(cow) = &mut *self
+            && let Cow::Owned(s) = cow {
                 // SAFETY:
                 // - We own this String and are in its Drop implementation
                 // - as_mut_ptr() returns valid pointer to the String's buffer
@@ -204,7 +204,6 @@ impl Drop for InternalContextField {
                     }
                 }
             };
-        }
         
         // High-level zeroization via zeroize crate
         self.zeroize();

@@ -1,6 +1,6 @@
 [package]
 name = "palisade-errors"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 authors = ["Guilherme F. G. Santos <strukturaenterprise@gmail.com>"]
 description = "Security-conscious error handling with operational security principles"
