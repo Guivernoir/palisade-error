@@ -8,7 +8,7 @@
 
 Palisade Errors is designed for systems where **information leakage is a security vulnerability**. Built as the foundational error handling layer for the **Palisade Honeypot System**, it enforces a strict separation between "what happened" (forensics) and "what the adversary sees" (sanitization), while guaranteeing that sensitive data in memory is zeroized immediately after use.
 
-**Current Version:** 1.0.0
+**Current Version:** 1.0.1
 
 ---
 
