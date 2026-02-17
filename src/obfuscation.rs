@@ -46,13 +46,18 @@
 //! Error with obfuscation:   243 ns  (4.1M errors/sec)
 
 use crate::ErrorCode;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Thread-local session salt for error code obfuscation.
-///
-/// Uses relaxed ordering since we don't need synchronization -
-/// each thread/session has its own salt and doesn't care about others.
-static SESSION_SALT: AtomicU32 = AtomicU32::new(0);
+// Thread-local session salt for error code obfuscation.
+//
+// Each thread/session has its own salt and doesn't share with others.
+thread_local! {
+    static SESSION_SALT: Cell<u8> = const { Cell::new(0) };
+}
+
+/// Counter mixed into generated salts to avoid repeats under high call rates.
+static SALT_COUNTER: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
 
 /// Initialize session-specific error code salt.
 ///
@@ -71,8 +76,8 @@ static SESSION_SALT: AtomicU32 = AtomicU32::new(0);
 pub fn init_session_salt(seed: u32) {
     // Use lower 3 bits: gives us 8 different offsets (0-7)
     // This keeps codes well within their 100-range namespaces
-    let salt = seed & 0b111;
-    SESSION_SALT.store(salt, Ordering::Relaxed);
+    let salt = (seed & 0b111) as u8;
+    SESSION_SALT.with(|v| v.set(salt));
 }
 
 /// Get current session salt value.
@@ -80,7 +85,7 @@ pub fn init_session_salt(seed: u32) {
 /// Useful for debugging or logging which salt is active.
 #[inline]
 pub fn get_session_salt() -> u32 {
-    SESSION_SALT.load(Ordering::Relaxed)
+    SESSION_SALT.with(|v| v.get() as u32)
 }
 
 /// Clear session salt (revert to no obfuscation).
@@ -88,7 +93,15 @@ pub fn get_session_salt() -> u32 {
 /// Useful for testing or when switching contexts.
 #[inline]
 pub fn clear_session_salt() {
-    SESSION_SALT.store(0, Ordering::Relaxed);
+    SESSION_SALT.with(|v| v.set(0));
+}
+
+#[inline]
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
 }
 
 /// Apply obfuscation to an error code using current session salt.
@@ -154,29 +167,14 @@ pub fn obfuscate_code(base: &ErrorCode) -> ErrorCode {
 /// ```
 #[inline]
 pub fn generate_random_salt() -> u32 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    
-    let random_state = RandomState::new();
-    let mut hasher = random_state.build_hasher();
-    
-    // Hash current time + thread ID for entropy
-    let now = std::time::SystemTime::now()
+    let now_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    
-    hasher.write_u128(now);
-    
-    // Also mix in thread ID if available
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        use std::hash::Hash;
-        let thread_id = std::thread::current().id();
-        thread_id.hash(&mut hasher);
-    }
-    
-    hasher.finish() as u32
+        .map_or(0_u64, |d| d.as_nanos() as u64);
+    let counter = SALT_COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    let stack_hint = (&now_nanos as *const u64 as usize) as u64;
+
+    let mixed = splitmix64(now_nanos ^ counter.rotate_left(11) ^ stack_hint.rotate_left(17));
+    (mixed ^ (mixed >> 32)) as u32
 }
 
 #[cfg(test)]
@@ -340,5 +338,21 @@ mod tests {
         // Each stays in its namespace
         assert_eq!(cfg_obf.code(), 104);  // 100 + 4
         assert_eq!(io_obf.code(), 804);   // 800 + 4
+    }
+
+    #[test]
+    fn salt_is_thread_local() {
+        clear_session_salt();
+        init_session_salt(5);
+
+        let child = std::thread::spawn(get_session_salt)
+            .join()
+            .expect("thread should not panic");
+
+        // Child thread should not inherit caller's salt.
+        assert_eq!(child, 0);
+        // Caller thread must keep its own session salt.
+        assert_eq!(get_session_salt(), 5);
+        clear_session_salt();
     }
 }

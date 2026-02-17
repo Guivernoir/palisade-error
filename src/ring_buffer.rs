@@ -40,7 +40,10 @@
 //! ```
 
 use crate::AgentError;
+use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::sync::RwLockReadGuard;
+use std::sync::RwLockWriteGuard;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -85,10 +88,9 @@ struct RingBuffer {
 impl RingBuffer {
     fn new(capacity: usize) -> Self {
         Self {
-            entries: (0..capacity)
-                .map(|_| None)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
+            entries: std::iter::repeat_with(|| None)
+                .take(capacity)
+                .collect::<Box<[Option<ForensicEntry>]>>(),
             tail: 0,
             head: 0,
             len: 0,
@@ -168,11 +170,28 @@ impl RingBufferLogger {
     /// let logger = RingBufferLogger::new(10_000, 1024);
     /// ```
     pub fn new(max_entries: usize, max_entry_bytes: usize) -> Self {
+        let bounded_entries = max_entries.max(1);
         Self {
-            buffer: Arc::new(RwLock::new(RingBuffer::new(max_entries))),
-            max_entries,
+            buffer: Arc::new(RwLock::new(RingBuffer::new(bounded_entries))),
+            max_entries: bounded_entries,
             max_entry_bytes,
             eviction_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    #[inline]
+    fn read_buffer(&self) -> RwLockReadGuard<'_, RingBuffer> {
+        match self.buffer.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    #[inline]
+    fn write_buffer(&self) -> RwLockWriteGuard<'_, RingBuffer> {
+        match self.buffer.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
@@ -195,7 +214,7 @@ impl RingBufferLogger {
     pub fn log(&self, err: &AgentError, source_ip: &str) {
         let entry = self.create_entry(err, source_ip);
 
-        let mut buffer = self.buffer.write().unwrap();
+        let mut buffer = self.write_buffer();
 
         // Evict oldest entry if buffer is full
         if let Some(_evicted) = buffer.push(entry) {
@@ -229,8 +248,7 @@ impl RingBufferLogger {
             remaining = remaining.saturating_sub(details_len);
 
             // Add metadata up to remaining space, values capped at 128 bytes each
-            // Fixed: Explicit type to prevent ambiguity in Arc creation
-            let mut metadata_vec: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+            let mut metadata_vec: SmallVec<[(Arc<str>, Arc<str>); 8]> = SmallVec::new();
             for (k, v) in log.metadata() {
                 if remaining == 0 {
                     break;
@@ -251,13 +269,11 @@ impl RingBufferLogger {
                 size += used;
                 remaining = remaining.saturating_sub(used);
                 
-                // Convert to Arc<str> for cheap cloning
-                // Fixed: explicitly use as_str() to ensure we get Arc<str> not Arc<&str>
                 metadata_vec.push((Arc::from(*k), Arc::from(value.as_ref())));
             }
 
-            // Convert metadata Vec to Box<[T]> for exact-size allocation
-            let metadata: Arc<[(Arc<str>, Arc<str>)]> = metadata_vec.into_boxed_slice().into();
+            let metadata: Arc<[(Arc<str>, Arc<str>)]> =
+                metadata_vec.into_vec().into_boxed_slice().into();
 
             // Add source_ip if space permits (cap to 128 bytes)
             let source_ip_str = if remaining == 0 {
@@ -271,9 +287,7 @@ impl RingBufferLogger {
             ForensicEntry {
                 timestamp: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                // Fixed: Enum to string conversion before Arc
+                    .map_or(0, |d| d.as_secs()),
                 code: Arc::from(log.code().to_string()),
                 operation: Arc::from(operation.as_ref()),
                 details: Arc::from(details.as_ref()),
@@ -302,7 +316,7 @@ impl RingBufferLogger {
     /// }
     /// ```
     pub fn get_recent(&self, count: usize) -> Vec<ForensicEntry> {
-        let buffer = self.buffer.read().unwrap();
+        let buffer = self.read_buffer();
         buffer
             .iter()
             .rev()
@@ -313,7 +327,7 @@ impl RingBufferLogger {
 
     /// Get all entries in reverse chronological order.
     pub fn get_all(&self) -> Vec<ForensicEntry> {
-        let buffer = self.buffer.read().unwrap();
+        let buffer = self.read_buffer();
         buffer.iter().rev().cloned().collect()
     }
 
@@ -333,14 +347,14 @@ impl RingBufferLogger {
     where
         F: Fn(&ForensicEntry) -> bool,
     {
-        let buffer = self.buffer.read().unwrap();
+        let buffer = self.read_buffer();
         buffer.iter().filter(|e| predicate(e)).cloned().collect()
     }
 
     /// Get current number of entries in buffer.
     #[inline]
     pub fn len(&self) -> usize {
-        let buffer = self.buffer.read().unwrap();
+        let buffer = self.read_buffer();
         buffer.len()
     }
 
@@ -352,7 +366,7 @@ impl RingBufferLogger {
 
     /// Get total payload bytes (lower-bound estimate).
     pub fn payload_bytes(&self) -> usize {
-        let buffer = self.buffer.read().unwrap();
+        let buffer = self.read_buffer();
         buffer.iter().map(|e| e.size_bytes).sum()
     }
 
@@ -366,7 +380,7 @@ impl RingBufferLogger {
 
     /// Clear all entries (useful after archival or testing).
     pub fn clear(&self) {
-        let mut buffer = self.buffer.write().unwrap();
+        let mut buffer = self.write_buffer();
         buffer.clear();
     }
 
@@ -424,7 +438,10 @@ fn truncate_to_bytes<'a>(s: &'a str, max_bytes: usize) -> Cow<'a, str> {
     }
 
     // Only path that allocates
-    Cow::Owned(format!("{}{}", &s[..idx], indicator))
+    let mut out = String::with_capacity(idx + indicator.len());
+    out.push_str(&s[..idx]);
+    out.push_str(indicator);
+    Cow::Owned(out)
 }
 
 #[cfg(test)]

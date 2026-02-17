@@ -172,28 +172,31 @@ impl<'a> InternalLog<'a> {
     pub fn write_to(&self, f: &mut impl fmt::Write) -> fmt::Result {
         write!(
             f,
-            "[{}] {} operation='{}' details='{}'",
+            "[{}] {} operation='",
             self.code,
             if self.retryable { "[RETRYABLE]" } else { "" },
-            truncate_with_indicator(self.operation),
-            truncate_with_indicator(self.details)
         )?;
+        write_truncated(f, self.operation)?;
+        f.write_str("' details='")?;
+        write_truncated(f, self.details)?;
+        f.write_str("'")?;
 
         if let Some(internal) = self.source_internal {
-            write!(f, " source='{}'", truncate_with_indicator(internal))?;
+            f.write_str(" source='")?;
+            write_truncated(f, internal)?;
+            f.write_str("'")?;
         }
 
         if let Some(sensitive) = self.source_sensitive {
-            write!(f, " sensitive='{}'", truncate_with_indicator(sensitive))?;
+            f.write_str(" sensitive='")?;
+            write_truncated(f, sensitive)?;
+            f.write_str("'")?;
         }
 
         for (key, value) in self.metadata {
-            write!(
-                f,
-                " {}='{}'",
-                key,
-                truncate_with_indicator(value.as_str())
-            )?;
+            write!(f, " {}='", key)?;
+            write_truncated(f, value.as_str())?;
+            f.write_str("'")?;
         }
 
         Ok(())
@@ -277,6 +280,26 @@ fn truncate_with_indicator(s: &str) -> Cow<'_, str> {
     result.push_str(&s[..idx]);
     result.push_str(TRUNCATION_INDICATOR);
     Cow::Owned(result)
+}
+
+#[inline]
+fn write_truncated(f: &mut impl fmt::Write, s: &str) -> fmt::Result {
+    if s.len() <= MAX_FIELD_OUTPUT_LEN {
+        return f.write_str(s);
+    }
+
+    let max_content_len = MAX_FIELD_OUTPUT_LEN.saturating_sub(TRUNCATION_INDICATOR.len());
+    let mut idx = max_content_len;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+
+    if idx == 0 {
+        return f.write_str(TRUNCATION_INDICATOR);
+    }
+
+    f.write_str(&s[..idx])?;
+    f.write_str(TRUNCATION_INDICATOR)
 }
 
 #[cfg(test)]

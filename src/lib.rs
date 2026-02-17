@@ -112,6 +112,7 @@ use std::fmt;
 use std::io;
 use std::result;
 use std::time::{Duration, Instant};
+use smallvec::SmallVec;
 use zeroize::Zeroize;
 use std::error::Error;
 use std::borrow::Cow;
@@ -149,7 +150,7 @@ struct ErrorContext {
     details: Cow<'static, str>,
     source_internal: Option<Cow<'static, str>>,
     source_sensitive: Option<Cow<'static, str>>,
-    metadata: Vec<(&'static str, ContextField)>,
+    metadata: SmallVec<[(&'static str, ContextField); 4]>,
 }
 
 impl ErrorContext {
@@ -160,7 +161,7 @@ impl ErrorContext {
             details: details.into(),
             source_internal: None,
             source_sensitive: None,
-            metadata: Vec::new(),
+            metadata: SmallVec::new(),
         }
     }
 
@@ -175,7 +176,7 @@ impl ErrorContext {
             details: details.into(),
             source_internal: None,
             source_sensitive: Some(sensitive_info.into()),
-            metadata: Vec::new(),
+            metadata: SmallVec::new(),
         }
     }
 
@@ -191,7 +192,7 @@ impl ErrorContext {
             details: details.into(),
             source_internal: Some(internal_source.into()),
             source_sensitive: Some(sensitive_source.into()),
-            metadata: Vec::new(),
+            metadata: SmallVec::new(),
         }
     }
 
@@ -225,6 +226,35 @@ impl Zeroize for ErrorContext {
 impl Drop for ErrorContext {
     fn drop(&mut self) {
         self.zeroize();
+    }
+}
+
+#[inline]
+const fn io_error_kind_label(kind: io::ErrorKind) -> &'static str {
+    match kind {
+        io::ErrorKind::NotFound => "NotFound",
+        io::ErrorKind::PermissionDenied => "PermissionDenied",
+        io::ErrorKind::ConnectionRefused => "ConnectionRefused",
+        io::ErrorKind::ConnectionReset => "ConnectionReset",
+        io::ErrorKind::HostUnreachable => "HostUnreachable",
+        io::ErrorKind::NetworkUnreachable => "NetworkUnreachable",
+        io::ErrorKind::ConnectionAborted => "ConnectionAborted",
+        io::ErrorKind::NotConnected => "NotConnected",
+        io::ErrorKind::AddrInUse => "AddrInUse",
+        io::ErrorKind::AddrNotAvailable => "AddrNotAvailable",
+        io::ErrorKind::BrokenPipe => "BrokenPipe",
+        io::ErrorKind::AlreadyExists => "AlreadyExists",
+        io::ErrorKind::WouldBlock => "WouldBlock",
+        io::ErrorKind::InvalidInput => "InvalidInput",
+        io::ErrorKind::InvalidData => "InvalidData",
+        io::ErrorKind::TimedOut => "TimedOut",
+        io::ErrorKind::WriteZero => "WriteZero",
+        io::ErrorKind::Interrupted => "Interrupted",
+        io::ErrorKind::Unsupported => "Unsupported",
+        io::ErrorKind::UnexpectedEof => "UnexpectedEof",
+        io::ErrorKind::OutOfMemory => "OutOfMemory",
+        io::ErrorKind::Other => "Other",
+        _ => "Unknown",
     }
 }
 
@@ -630,7 +660,7 @@ impl AgentError {
             code,
             operation,
             "I/O operation failed",
-            format!("{:?}", error.kind()),  // Internal: error kind
+            io_error_kind_label(error.kind()), // Internal: error kind
             path.into(),                // Sensitive: filesystem path
         )
     }
