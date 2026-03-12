@@ -424,7 +424,7 @@ When a new invariant pattern is needed on `DualContextError`:
 | `strict_severity` | Off | No | Yes |
 | `external_signaling` | Off | Test both states | No (honeypot default) |
 | `trusted_debug` | Off | No | **Never** |
-| `tokio` / `async_std` | Off | If used | If async runtime present |
+| `with_timing_normalization_async()` | Always available | No | Yes |
 
 ---
 

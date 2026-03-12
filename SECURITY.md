@@ -37,7 +37,7 @@ The library provides two complementary error types that share the same security 
 
 - **Sanitization:** `AgentError::Display` and `DualContextError::Display` never leak internal state, file paths, or variable values. External output format is fixed: `{Category} operation failed [{permanence}] ({ERROR-CODE})` for `AgentError`, or the public context string for `DualContextError`.
 - **Type-Enforced Trust Boundaries:** No implicit conversion exists between `PublicContext` and `InternalContext`. The type system prevents accidental cross-boundary leakage at compile time.
-- **Ephemerality:** Sensitive data lives in `ZeroizeOnDrop` wrappers. Secrets are wiped from memory when the error is dropped.
+- **Ephemerality:** Sensitive data is scrubbed through the crate-local `zeroization` module. Secrets are wiped from memory when the error is dropped.
 - **Volatile Write Protection:** `InternalContextField::Sensitive` variants receive `ptr::write_volatile` treatment in `Drop` to defeat LLVM dead-store elimination, followed by a `compiler_fence(SeqCst)` to prevent instruction reordering. This provides best-effort defense against compiler-level optimizations that could remove the clearing operation.
 - **DoS Resistance:** All log formatting is bounded. `InternalLog` fields are truncated at 1024 characters. Convenience macro arguments must be wrapped in `sanitized!()` which truncates at 256 characters and neutralizes control characters.
 - **Timing Resistance:** All `AgentError` construction enforces a 1 µs constant-time floor via spin loop. `with_timing_normalization()` and `with_timing_normalization_async()` extend this for sensitive operation windows.
@@ -71,7 +71,7 @@ The `DualContextError::with_double_lie()` constructor provides an additional lay
 
 **Protection:** Three-layer defense on sensitive data:
 
-1. **High-level zeroization:** `zeroize` crate clears owned `String` buffers.
+1. **High-level zeroization:** The crate-local `zeroization` module clears owned `String` buffers.
 2. **Volatile writes:** `ptr::write_volatile` over the raw buffer bytes prevents LLVM from removing the clearing operation as a dead store.
 3. **Compiler fence:** `compiler_fence(SeqCst)` ensures zeroization instructions complete before the drop chain continues.
 
@@ -92,7 +92,7 @@ For cryptographic key material requiring HSM-grade wiping, use platform-specific
 
 - All `AgentError` construction enforces a 1 µs constant-time floor via spin loop.
 - `with_timing_normalization(Duration)` adds a deadline-based delay on the error path to equalize timing across divergent code paths.
-- `with_timing_normalization_async(Duration).await` provides the same without blocking the executor thread (requires `tokio` or `async_std` feature).
+- `with_timing_normalization_async(Duration).await` provides the same without blocking the executor thread and does not require a runtime-specific feature gate.
 
 Limitations: OS scheduling introduces 1–15 ms jitter. Network timing, cache behavior, and database queries are not covered. This is defense-in-depth, not a complete solution.
 

@@ -72,7 +72,7 @@ Application Logic (fails)
 │  └────────────────────────────────────┘ │
 │                                         │
 │  ┌────────────────────────────────────┐ │
-│  │ Sensitive (ZeroizeOnDrop +         │ │──→ Encrypted, access-controlled
+│  │ Sensitive (local zeroization +     │ │──→ Encrypted, access-controlled
 │  │ volatile writes) — PII, creds,     │ │    restricted-access storage
 │  │ paths, keys                        │ │    (requires SocAccess token)
 │  └────────────────────────────────────┘ │
@@ -89,7 +89,7 @@ Best-effort Memory Zeroization
 - **Dual-Context Model:** `DualContextError` gives type-enforced separation of public lies from internal truth.
 - **Capability-Based Access:** `SocAccess` prevents accidental sensitive data exposure through generic formatting paths.
 - **Information Hiding:** `Display` on all error types is sanitized to reveal only error codes and categories.
-- **Memory Safety:** Sensitive data lives in `ZeroizeOnDrop` wrappers. Owned strings receive volatile writes on drop to defeat LLVM dead-store elimination. Secrets are wiped from memory as soon as the error is dropped.
+- **Memory Safety:** Sensitive data flows through the crate-local `zeroization` module. Owned strings receive volatile writes on drop to defeat LLVM dead-store elimination. Secrets are wiped from memory as soon as the error is dropped.
 - **Always-On Obfuscation:** Session salts are applied at construction time. The same semantic error produces different codes across sessions, defeating fingerprinting.
 - **DoS Protection:** Log outputs are strictly truncated. Convenience macros enforce `sanitized!()` wrapping for dynamic arguments.
 - **Strict Taxonomy:** Feature flags enforce rigid error categorization at compile time.
@@ -106,7 +106,7 @@ Best-effort Memory Zeroization
 | `strict_severity` | Off | Restricts Breach-level impacts to namespaces with `can_breach` authority. Recommended for production. |
 | `external_signaling` | Off | Enables `PublicContext::truth()` and `DualContextError::with_truth()`. Without this flag, **all external output must be deceptive** — enforced at compile time. |
 | `trusted_debug` | Off | Enables `InternalLog::format_for_trusted_debug()`. Only activates in `debug_assertions` builds. |
-| `tokio` / `async_std` | Off | Enables `AgentError::with_timing_normalization_async()` for non-blocking timing normalization. |
+| `with_timing_normalization_async()` | Always available | Runtime-free async timing normalization built on the crate-local `ct` module. |
 
 ---
 
@@ -310,7 +310,7 @@ fn authenticate(user: &str, pass: &str) -> palisade_errors::Result<()> {
 }
 ```
 
-Both paths take at least 100 ms, preventing user enumeration via response time. For async runtimes, use `with_timing_normalization_async()` (requires `tokio` or `async_std` feature).
+Both paths take at least 100 ms, preventing user enumeration via response time. The async variant, `with_timing_normalization_async()`, is available without a runtime-specific feature flag.
 
 ### Bounded Forensic Logging
 

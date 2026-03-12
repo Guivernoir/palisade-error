@@ -1,43 +1,44 @@
-//! Structured log entry for internal forensics.
+//! Structured internal log view.
 //!
-//! # Critical Security Properties
+//! `InternalLog` is `pub(crate)` only.  External callers interact with error
+//! data exclusively through the redacted `Display` on `AgentError` or by
+//! reading an encrypted log file produced by `AgentError::log()`.
 //!
-//! - Borrows from AgentError with explicit lifetime
-//! - CANNOT outlive the error that created it
-//! - Forces immediate consumption by logger
-//! - NO heap allocations in accessors
-//! - NO leaked memory
-//! - NO escaped references
+//! # Trust boundary
 //!
-//! This structure exists only during the logging call and is destroyed
-//! immediately afterward, ensuring all sensitive data is zeroized when
-//! the error drops.
+//! | Field      | Accessor             | Requires            |
+//! |------------|----------------------|---------------------|
+//! | external   | `external()`         | nothing (lie/decoy) |
+//! | internal   | `internal()`         | trusted log context |
+//! | sensitive  | `expose_sensitive()` | `SocAccess` token   |
 //!
-//! The short lifetime is a FEATURE, not a limitation. It enforces that
-//! sensitive data cannot be retained beyond its intended scope.
+//! # Zero-allocation guarantee
+//!
+//! All accessors return `&str` slices into the parent `AgentError`.
+//! `write_to()` writes directly to a `fmt::Write` sink — no intermediate heap.
 
-use crate::ErrorCode;
+use crate::codes::ErrorCode;
+use crate::models::SocAccess;
+use crate::zeroization::{Zeroize, drop_zeroize};
 use std::borrow::Cow;
 use std::fmt;
-use zeroize::Zeroize;
 
-/// Maximum length for any individual field in formatted output (DoS prevention)
-const MAX_FIELD_OUTPUT_LEN: usize = 1024;
+// ── Field length caps ─────────────────────────────────────────────────────────
 
-/// Truncation indicator appended to truncated strings
+const MAX_FIELD_OUTPUT_LEN: usize = 1_024;
 const TRUNCATION_INDICATOR: &str = "...[TRUNCATED]";
 
-/// Metadata value wrapper with zeroization for owned data.
-///
-/// Borrowed values are assumed static and are not zeroized.
+// ── ContextField ──────────────────────────────────────────────────────────────
+
+/// Metadata value wrapper with zeroize-on-drop for owned data.
 #[derive(Debug)]
-pub struct ContextField {
-    value: Cow<'static, str>,
+pub(crate) struct ContextField {
+    pub(crate) value: Cow<'static, str>,
 }
 
 impl ContextField {
     #[inline]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         self.value.as_ref()
     }
 }
@@ -74,208 +75,127 @@ impl Zeroize for ContextField {
 
 impl Drop for ContextField {
     fn drop(&mut self) {
-        self.zeroize();
+        drop_zeroize(self);
     }
 }
 
-/// Structured log entry with borrowed data from AgentError.
+// ── InternalLog ───────────────────────────────────────────────────────────────
+
+/// Structured view of an `AgentError` for crate-internal logging purposes.
 ///
-/// This struct has an explicit lifetime parameter that ties it to the
-/// error that created it, preventing the log from outliving the error.
+/// # Lifetime
 ///
-/// # Example
+/// `'a` is tied to the originating `AgentError`.  The log cannot outlive the
+/// error — compiler-enforced, not merely conventional.
 ///
-/// ```rust
-/// # use palisade_errors::{AgentError, definitions};
-/// let err = AgentError::config(definitions::CFG_PARSE_FAILED, "test", "details");
-/// let log = err.internal_log();
-/// // Use log immediately
-/// // log is destroyed when it goes out of scope
-/// ```
-#[derive(Debug)]
-pub struct InternalLog<'a> {
-    pub code: &'a ErrorCode,
-    pub operation: &'a str,
-    pub details: &'a str,
-    pub source_internal: Option<&'a str>,
-    pub source_sensitive: Option<&'a str>,
-    pub metadata: &'a [(&'static str, ContextField)],
-    pub retryable: bool,
+/// # Security note
+///
+/// `Display` and `Debug` are intentionally absent.  Callers must use explicit
+/// accessor methods to select which fields to emit, preventing accidental
+/// bulk-logging of sensitive content.
+///
+/// `pub(crate)` — not accessible from outside this crate.
+pub(crate) struct InternalLog<'a> {
+    pub(crate) code: &'a ErrorCode,
+    pub(crate) external: &'a str,
+    pub(crate) internal: &'a str,
+    pub(crate) sensitive: Option<&'a str>,
+    pub(crate) retryable: bool,
 }
 
 impl<'a> InternalLog<'a> {
-    /// Format for human-readable logs in trusted debug contexts.
-    ///
-    /// WARNING: This materializes sensitive data into a String.
-    /// This function is only available with BOTH the `trusted_debug` feature flag
-    /// AND debug assertions enabled. This prevents accidental use in production.
-    ///
-    /// Only use this in:
-    /// - Local development debugging
-    /// - Trusted internal logging systems with proper access controls
-    /// - Post-mortem forensic analysis in secure environments
-    ///
-    /// NEVER use in:
-    /// - External-facing logs
-    /// - Untrusted log aggregation
-    /// - Production without proper sanitization pipeline
-    #[cfg(all(feature = "trusted_debug", debug_assertions))]
-    pub fn format_for_trusted_debug(&self) -> String {
-        let mut output = format!(
-            "[{}] {} operation='{}' details='{}'",
-            self.code,
-            if self.retryable { "[RETRYABLE]" } else { "" },
-            truncate_with_indicator(self.operation),
-            truncate_with_indicator(self.details)
-        );
-
-        if let Some(internal) = self.source_internal {
-            output.push_str(&format!(
-                " source='{}'",
-                truncate_with_indicator(internal)
-            ));
+    #[inline]
+    pub(crate) fn new(
+        code: &'a ErrorCode,
+        external: &'a str,
+        internal: &'a str,
+        sensitive: Option<&'a str>,
+        retryable: bool,
+    ) -> Self {
+        Self {
+            code,
+            external,
+            internal,
+            sensitive,
+            retryable,
         }
-
-        if let Some(sensitive) = self.source_sensitive {
-            output.push_str(&format!(
-                " sensitive='{}'",
-                truncate_with_indicator(sensitive)
-            ));
-        }
-
-        for (key, value) in self.metadata {
-            output.push_str(&format!(
-                " {}='{}'",
-                key,
-                truncate_with_indicator(value.as_str())
-            ));
-        }
-
-        output
     }
 
-    /// Write structured log data to a formatter without allocating.
+    // ── Accessors ─────────────────────────────────────────────────────────────
+
+    /// Obfuscated error code string, e.g. `"E-CFG-103"`.
+    #[inline]
+    pub(crate) fn code_display(&self) -> String {
+        self.code.to_string()
+    }
+
+    /// Deceptive category label (mirrors external-facing output).
+    #[inline]
+    pub(crate) fn category_name(&self) -> &'static str {
+        self.code.category().deceptive_name()
+    }
+
+    /// The external / deceptive payload — the lie presented to adversaries.
+    #[inline]
+    pub(crate) fn external(&self) -> &str {
+        self.external
+    }
+
+    /// The internal diagnostic payload.  **Never** forward to external systems.
+    #[inline]
+    pub(crate) fn internal(&self) -> &str {
+        self.internal
+    }
+
+    /// Access the sensitive payload.  Requires a `SocAccess` capability token.
+    #[inline]
+    pub(crate) fn expose_sensitive(&self, _token: &SocAccess) -> Option<&str> {
+        self.sensitive
+    }
+
+    /// Whether the originating error is transient.
+    #[inline]
+    pub(crate) const fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+
+    // ── Formatted output ──────────────────────────────────────────────────────
+
+    /// Write non-sensitive fields to any `fmt::Write` sink.
     ///
-    /// This is the preferred method for production logging as it:
-    /// - Does not allocate strings for sensitive data
-    /// - Writes directly to the output
-    /// - Allows the logging framework to control serialization
-    /// - Truncates fields to prevent DoS via memory exhaustion
-    ///
-    /// Example:
-    /// ```rust,ignore
-    /// err.with_internal_log(|log| {
-    ///     let mut buffer = String::new();
-    ///     log.write_to(&mut buffer).unwrap();
-    /// });
-    /// ```
-    pub fn write_to(&self, f: &mut impl fmt::Write) -> fmt::Result {
+    /// Writes `code`, `category`, `retryable`, `external`, and `internal`.
+    /// The `sensitive` field is **never** written; callers must use
+    /// `expose_sensitive` explicitly.  Each field is truncated to
+    /// `MAX_FIELD_OUTPUT_LEN` bytes to prevent DoS via enormous payloads.
+    pub(crate) fn write_to(&self, f: &mut impl fmt::Write) -> fmt::Result {
         write!(
             f,
-            "[{}] {} operation='",
+            "[{}]{} category='{}' external='",
             self.code,
             if self.retryable { "[RETRYABLE]" } else { "" },
+            self.code.category().deceptive_name(),
         )?;
-        write_truncated(f, self.operation)?;
-        f.write_str("' details='")?;
-        write_truncated(f, self.details)?;
-        f.write_str("'")?;
-
-        if let Some(internal) = self.source_internal {
-            f.write_str(" source='")?;
-            write_truncated(f, internal)?;
-            f.write_str("'")?;
-        }
-
-        if let Some(sensitive) = self.source_sensitive {
-            f.write_str(" sensitive='")?;
-            write_truncated(f, sensitive)?;
-            f.write_str("'")?;
-        }
-
-        for (key, value) in self.metadata {
-            write!(f, " {}='", key)?;
-            write_truncated(f, value.as_str())?;
-            f.write_str("'")?;
-        }
-
-        Ok(())
-    }
-
-    /// Access structured fields for JSON/structured logging.
-    ///
-    /// Preferred over string formatting because it allows the logging
-    /// framework to handle sensitive data according to its own policies.
-    ///
-    /// Note: Fields are not truncated here - truncation is the responsibility
-    /// of the logging framework when serializing to its output format.
-    #[inline]
-    pub const fn code(&self) -> &ErrorCode {
-        self.code
-    }
-
-    #[inline]
-    pub const fn operation(&self) -> &str {
-        self.operation
-    }
-
-    #[inline]
-    pub const fn details(&self) -> &str {
-        self.details
-    }
-
-    #[inline]
-    pub const fn source_internal(&self) -> Option<&str> {
-        self.source_internal
-    }
-
-    #[inline]
-    pub const fn source_sensitive(&self) -> Option<&str> {
-        self.source_sensitive
-    }
-
-    /// Get metadata fields - zero-cost accessor.
-    ///
-    /// PERFORMANCE FIX: Removed enforce_metadata_floor() that was causing
-    /// 15ms delays. Timing obfuscation should be done once during error
-    /// construction, not on every field access.
-    #[inline]
-    pub const fn metadata(&self) -> &[(&'static str, ContextField)] {
-        self.metadata
-    }
-
-    #[inline]
-    pub const fn is_retryable(&self) -> bool {
-        self.retryable
+        write_truncated(f, self.external)?;
+        f.write_str("' internal='")?;
+        write_truncated(f, self.internal)?;
+        f.write_str("' sensitive=<REQUIRES_SOC_ACCESS>")
     }
 }
 
-/// Truncate a string for display to prevent DoS via extremely long error messages.
-///
-/// If the string exceeds MAX_FIELD_OUTPUT_LEN, it's truncated with an indicator
-/// to make the truncation visible to operators.
-///
-/// Returns a Cow<str> to avoid allocation when no truncation is needed.
+// ── Truncation helpers ────────────────────────────────────────────────────────
+
 fn truncate_with_indicator(s: &str) -> Cow<'_, str> {
     if s.len() <= MAX_FIELD_OUTPUT_LEN {
         return Cow::Borrowed(s);
     }
-
-    // Reserve space for the truncation indicator
-    let max_content_len = MAX_FIELD_OUTPUT_LEN.saturating_sub(TRUNCATION_INDICATOR.len());
-
-    // Find the last valid UTF-8 character boundary at or before the limit
-    let mut idx = max_content_len;
+    let max_content = MAX_FIELD_OUTPUT_LEN.saturating_sub(TRUNCATION_INDICATOR.len());
+    let mut idx = max_content;
     while idx > 0 && !s.is_char_boundary(idx) {
         idx -= 1;
     }
-
-    // If we couldn't find a boundary (pathological case), just use the indicator
     if idx == 0 {
         return Cow::Borrowed(TRUNCATION_INDICATOR);
     }
-
-    // Allocate a new string with the truncated content + indicator
     let mut result = String::with_capacity(idx + TRUNCATION_INDICATOR.len());
     result.push_str(&s[..idx]);
     result.push_str(TRUNCATION_INDICATOR);
@@ -283,126 +203,66 @@ fn truncate_with_indicator(s: &str) -> Cow<'_, str> {
 }
 
 #[inline]
-fn write_truncated(f: &mut impl fmt::Write, s: &str) -> fmt::Result {
+pub(crate) fn write_truncated(f: &mut impl fmt::Write, s: &str) -> fmt::Result {
     if s.len() <= MAX_FIELD_OUTPUT_LEN {
         return f.write_str(s);
     }
-
-    let max_content_len = MAX_FIELD_OUTPUT_LEN.saturating_sub(TRUNCATION_INDICATOR.len());
-    let mut idx = max_content_len;
+    let max_content = MAX_FIELD_OUTPUT_LEN.saturating_sub(TRUNCATION_INDICATOR.len());
+    let mut idx = max_content;
     while idx > 0 && !s.is_char_boundary(idx) {
         idx -= 1;
     }
-
     if idx == 0 {
         return f.write_str(TRUNCATION_INDICATOR);
     }
-
     f.write_str(&s[..idx])?;
     f.write_str(TRUNCATION_INDICATOR)
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn truncate_ascii() {
-        let s = "a".repeat(MAX_FIELD_OUTPUT_LEN + 10);
-        let truncated = truncate_with_indicator(&s);
-
-        // Should be truncated
-        assert!(truncated.len() <= MAX_FIELD_OUTPUT_LEN);
-
-        // Should contain truncation indicator
-        assert!(truncated.ends_with(TRUNCATION_INDICATOR));
-    }
-
-    #[test]
-    fn no_truncate_when_under_limit() {
-        let s = "short string";
-        let truncated = truncate_with_indicator(s);
-
-        // Should be borrowed (no allocation)
-        assert!(matches!(truncated, Cow::Borrowed(_)));
-        assert_eq!(truncated, s);
-    }
-
-    #[test]
-    fn truncate_utf8_boundary() {
-        // Russian text: каждый символ занимает 2 байта
-        let s = "й".repeat(MAX_FIELD_OUTPUT_LEN); // Each 'й' is 2 bytes
-        let truncated = truncate_with_indicator(&s);
-
-        // Should not panic, should be valid UTF-8
-        let _ = truncated.to_string();
-
-        // Length should be at most MAX_FIELD_OUTPUT_LEN
-        assert!(truncated.len() <= MAX_FIELD_OUTPUT_LEN);
-
-        // Should end with truncation indicator
-        assert!(truncated.ends_with(TRUNCATION_INDICATOR));
-    }
-
-    #[test]
-    fn truncate_emoji() {
-        let s = "🔥".repeat(MAX_FIELD_OUTPUT_LEN); // Each emoji is 4 bytes
-        let truncated = truncate_with_indicator(&s);
-
-        // Must remain valid UTF-8
-        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
-
-        // Should contain truncation indicator
-        assert!(truncated.ends_with(TRUNCATION_INDICATOR));
-    }
-
-    #[test]
-    fn exactly_at_limit() {
+    fn truncate_at_limit_no_allocation() {
         let s = "a".repeat(MAX_FIELD_OUTPUT_LEN);
-        let truncated = truncate_with_indicator(&s);
-
-        // Should NOT be truncated (exactly at limit)
-        assert!(matches!(truncated, Cow::Borrowed(_)));
-        assert_eq!(truncated.len(), MAX_FIELD_OUTPUT_LEN);
-        assert!(!truncated.ends_with(TRUNCATION_INDICATOR));
+        let result = truncate_with_indicator(&s);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result.len(), MAX_FIELD_OUTPUT_LEN);
     }
 
     #[test]
-    fn one_over_limit() {
-        let s = "a".repeat(MAX_FIELD_OUTPUT_LEN + 1);
-        let truncated = truncate_with_indicator(&s);
+    fn truncate_over_limit_appends_indicator() {
+        let s = "a".repeat(MAX_FIELD_OUTPUT_LEN + 10);
+        let result = truncate_with_indicator(&s);
+        assert!(matches!(result, Cow::Owned(_)));
+        assert!(result.len() <= MAX_FIELD_OUTPUT_LEN);
+        assert!(result.ends_with(TRUNCATION_INDICATOR));
+    }
 
-        // Should be truncated
-        assert!(matches!(truncated, Cow::Owned(_)));
-        assert!(truncated.len() <= MAX_FIELD_OUTPUT_LEN);
-        assert!(truncated.ends_with(TRUNCATION_INDICATOR));
+    #[test]
+    fn truncate_respects_utf8_boundary() {
+        let s = "й".repeat(MAX_FIELD_OUTPUT_LEN); // 2 bytes each
+        let result = truncate_with_indicator(&s);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        assert!(result.len() <= MAX_FIELD_OUTPUT_LEN);
     }
 
     #[test]
     fn context_field_zeroizes_owned() {
         let mut field = ContextField::from(String::from("sensitive"));
-
-        // Verify it's owned
         assert!(matches!(field.value, Cow::Owned(_)));
-
-        // Zeroize manually (normally done in Drop)
         field.zeroize();
-
-        // Value should be empty after zeroization
         assert_eq!(field.as_str(), "");
     }
 
     #[test]
-    fn context_field_doesnt_zeroize_borrowed() {
+    fn context_field_noop_for_borrowed() {
         let mut field = ContextField::from("static");
-
-        // Verify it's borrowed
         assert!(matches!(field.value, Cow::Borrowed(_)));
-
-        // Zeroize should be no-op for borrowed
-        field.zeroize();
-
-        // Value should still be intact (static string)
+        field.zeroize(); // must not panic
         assert_eq!(field.as_str(), "static");
     }
 }

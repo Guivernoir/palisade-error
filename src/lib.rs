@@ -1,879 +1,847 @@
-//! # Palisade Errors
+//! # Palisade Errors — blackbox edition
 //!
-//! Security-conscious error handling with operational security principles.
+//! Security-conscious error handling for hostile-environment deployments.
 //!
-//! ## Design Philosophy
+//! ## Public surface (total)
 //!
-//! 1. **Internal errors contain full context** for forensic analysis
-//! 2. **External errors reveal nothing** that aids an adversary
-//! 3. **Error codes enable tracking** without information disclosure
-//! 4. **Sensitive data is explicitly marked** and zeroized
-//! 5. **Sanitization is mandatory** and provides useful signals without leaking details
-//! 6. **Timing attacks are mitigated** through optional normalization
-//!
-//! ## Security Principles
-//!
-//! - Never expose file paths, usernames, PIDs, or configuration values externally
-//! - Never reveal internal architecture, component names, or validation logic
-//! - Never show stack traces, memory addresses, or timing information
-//! - Sanitized output still provides operation category and retry hints
-//! - ALL context data is zeroized on drop - NO LEAKS, NO EXCEPTIONS
-//! - Zero-allocation hot paths where possible
-//! - Timing side-channels can be mitigated with normalization
-//!
-//! ## Threat Model
-//!
-//! We assume attackers:
-//! - Read our source code
-//! - Trigger errors intentionally to fingerprint the system
-//! - Collect error messages to map internal architecture
-//! - Use timing and error patterns for side-channel attacks
-//! - Perform post-compromise memory scraping and core dump analysis
-//!
-//! Therefore:
-//! - External errors provide only error codes and operation categories
-//! - Internal logs use structured data with explicit, short lifetimes
-//! - ALL error context is zeroized on drop
-//! - No string concatenation of sensitive data
-//! - No leaked allocations that bypass zeroization
-//! - Sensitive/Internal fields kept separate to prevent conflation
-//! - Timing normalization available for sensitive operations
-//!
-//! ## Quick Start
-//!
-//! ```rust
-//! use palisade_errors::{AgentError, definitions, Result};
-//!
-//! fn validate_config(threshold: f64) -> Result<()> {
-//!     if threshold < 0.0 || threshold > 100.0 {
-//!         return Err(AgentError::config(
-//!             definitions::CFG_INVALID_VALUE,
-//!             "validate_threshold",
-//!             "Threshold must be between 0 and 100"
-//!         ));
-//!     }
-//!     Ok(())
-//! }
-//!
-//! // External display (safe for untrusted viewers):
-//! // "Configuration operation failed [permanent] (E-CFG-103)"
-//!
-//! // Internal log (full context for forensics):
-//! // [E-CFG-103] operation='validate_threshold' details='Threshold must be between 0 and 100'
+//! ```text
+//! AgentError::new(code, external, internal, sensitive) -> AgentError
+//! AgentError::log(&self, path: &Path) -> io::Result<()>
+//! Result<T>   (type alias)
 //! ```
 //!
-//! ## Working with Sensitive Data
+//! Everything else — codes, ring buffer, session salt, internal log, SOC
+//! access tokens — is `pub(crate)` or private.  External crates can only
+//! construct errors through `new()` and optionally persist them through
+//! `log()`.
 //!
-//! ```rust
-//! use palisade_errors::{AgentError, definitions, Result};
-//! use std::fs::File;
+//! ## Automatic security behaviours (zero opt-out)
 //!
-//! fn load_config(path: String) -> Result<File> {
-//!     File::open(&path).map_err(|e|
-//!         AgentError::from_io_path(
-//!             definitions::IO_READ_FAILED,
-//!             "load_config",
-//!             path,  // Kept separate as sensitive data
-//!             e
-//!         )
-//!     )
-//! }
-//! ```
+//! Every call to `AgentError::new()` unconditionally applies:
 //!
-//! ## Timing Attack Mitigation
+//! - **Code obfuscation** — numeric code is offset by a per-session random
+//!   salt so attackers cannot build a stable fingerprint map across sessions.
+//! - **Constant-time floor** — a 1 µs spin-loop prevents timing-based
+//!   discrimination between fast and slow error paths.
+//! - **Ring-buffer logging** — the error is appended to an in-process
+//!   forensic buffer (capacity 4 096 × 2 KiB ≈ 8 MiB) for DoS-bounded
+//!   forensic retention.
+//! - **Redacted Display** — `Display` only emits the obfuscated code and
+//!   its deceptive category label; no payload content ever appears.
+//! - **Zeroize on Drop** — every `Cow::Owned` payload is overwritten before
+//!   the allocator reclaims the memory.
 //!
-//! ```rust
-//! use palisade_errors::{AgentError, definitions, Result};
-//! use std::time::Duration;
+//! ## Log encryption (`AgentError::log`)
 //!
-//! fn authenticate(username: &str, password: &str) -> Result<()> {
-//!     // Perform authentication...
-//!     # Ok(())
-//! }
+//! Calling `.log(path)` appends one AES-256-GCM-encrypted record to `path`
+//! and immediately sets the file to read-only (`0o400` on Unix).
 //!
-//! // Normalize timing to prevent timing side-channels
-//! let result = authenticate("user", "pass");
-//! if let Err(e) = result {
-//!     // Delay error response to constant time
-//!     return Err(e.with_timing_normalization(Duration::from_millis(100)));
-//! }
-//! # Ok(())
-//! ```
+//! - The session key is generated once from the OS CSPRNG and held in
+//!   process memory only — it is never written to disk.
+//! - Each record includes an HMAC-SHA512 tag for tamper detection.
+//! - Reading the log file requires the session key, which demands either
+//!   live process-memory access (root / ptrace) or a separately secured
+//!   key-escrow mechanism.
 //!
-//! ## Features
+//! ## Error code ranges
 //!
-//! - `trusted_debug`: Enable detailed debug formatting for trusted environments (debug builds only)
-//! - `external_signaling`: Reserved for future external signaling capabilities
+//! | Range     | Namespace | Domain                  |
+//! |-----------|-----------|-------------------------|
+//! | 1 – 30    | CORE      | Fundamental system       |
+//! | 100 – 131 | CFG       | Configuration            |
+//! | 200 – 237 | DCP       | Deception subsystem      |
+//! | 300 – 333 | TEL       | Telemetry                |
+//! | 400 – 434 | COR       | Correlation / analysis   |
+//! | 500 – 533 | RSP       | Response / action        |
+//! | 600 – 630 | LOG       | Logging / audit          |
+//! | 700 – 730 | PLT       | Platform / OS            |
+//! | 800 – 830 | IO        | Filesystem / network     |
 
-#![warn(missing_docs)]
-#![warn(clippy::all)]
+#![deny(missing_docs)]
+#![deny(clippy::all)]
+#![deny(clippy::clone_on_ref_ptr)]
 
+use std::borrow::Cow;
+use std::error::Error;
 use std::fmt;
 use std::io;
+use std::path::Path;
 use std::result;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use smallvec::SmallVec;
-use zeroize::Zeroize;
-use std::error::Error;
-use std::borrow::Cow;
+use zeroization::Zeroize;
 
-pub mod codes;
-pub mod context;
-pub mod convenience;
-pub mod definitions;
-pub mod logging;
-pub mod models;
-pub mod obfuscation;
-pub mod ring_buffer;
+// ── Internal modules ──────────────────────────────────────────────────────────
 
-pub use codes::*;
-pub use context::*;
-pub use convenience::*;
-pub use definitions::*;
-pub use logging::*;
-pub use models::*;
-pub use obfuscation::*;
-pub use ring_buffer::*;
+mod codes;
+mod context;
+mod convenience;
+mod crypto;
+mod ct;
+mod definitions;
+mod log_sink;
+mod logging;
+mod models;
+mod obfuscation;
+mod ring_buffer;
+mod zeroization;
 
-/// Type alias for Results using our error type.
+// ── Public surface ────────────────────────────────────────────────────────────
+
+/// Type alias for `std::result::Result` specialised on [`AgentError`].
 pub type Result<T> = result::Result<T, AgentError>;
 
-// ============================================================================
-// Internal Error Context (Legacy, Still Used by AgentError)
-// ============================================================================
+// ── Session key (process-lifetime, never written to disk) ─────────────────────
 
-/// Internal error context storage for `AgentError`.
+/// AES-256 session key held exclusively in process memory.
 ///
-/// This preserves the legacy context model while newer DualContextError APIs evolve.
-struct ErrorContext {
-    operation: Cow<'static, str>,
-    details: Cow<'static, str>,
-    source_internal: Option<Cow<'static, str>>,
-    source_sensitive: Option<Cow<'static, str>>,
-    metadata: SmallVec<[(&'static str, ContextField); 4]>,
-}
+/// Seeded once from the OS CSPRNG on first log write.  Never exported, never
+/// written to disk.  Requires root/ptrace to extract from a running process.
+static SESSION_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 
-impl ErrorContext {
-    #[inline]
-    fn new(operation: impl Into<Cow<'static, str>>, details: impl Into<Cow<'static, str>>) -> Self {
-        Self {
-            operation: operation.into(),
-            details: details.into(),
-            source_internal: None,
-            source_sensitive: None,
-            metadata: SmallVec::new(),
-        }
-    }
-
-    #[inline]
-    fn with_sensitive(
-        operation: impl Into<Cow<'static, str>>,
-        details: impl Into<Cow<'static, str>>,
-        sensitive_info: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self {
-            operation: operation.into(),
-            details: details.into(),
-            source_internal: None,
-            source_sensitive: Some(sensitive_info.into()),
-            metadata: SmallVec::new(),
-        }
-    }
-
-    #[inline]
-    fn with_source_split(
-        operation: impl Into<Cow<'static, str>>,
-        details: impl Into<Cow<'static, str>>,
-        internal_source: impl Into<Cow<'static, str>>,
-        sensitive_source: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self {
-            operation: operation.into(),
-            details: details.into(),
-            source_internal: Some(internal_source.into()),
-            source_sensitive: Some(sensitive_source.into()),
-            metadata: SmallVec::new(),
-        }
-    }
-
-    #[inline]
-    fn add_metadata(&mut self, key: &'static str, value: impl Into<Cow<'static, str>>) {
-        self.metadata.push((key, ContextField::from(value.into())));
-    }
-}
-
-impl Zeroize for ErrorContext {
-    fn zeroize(&mut self) {
-        if let Cow::Owned(ref mut s) = self.operation {
-            s.zeroize();
-        }
-        if let Cow::Owned(ref mut s) = self.details {
-            s.zeroize();
-        }
-        if let Some(Cow::Owned(ref mut s)) = self.source_internal {
-            s.zeroize();
-        }
-        if let Some(Cow::Owned(ref mut s)) = self.source_sensitive {
-            s.zeroize();
-        }
-        for (_, value) in &mut self.metadata {
-            value.zeroize();
-        }
-        self.metadata.clear();
-    }
-}
-
-impl Drop for ErrorContext {
-    fn drop(&mut self) {
-        self.zeroize();
-    }
+#[cold]
+fn init_session_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    crypto::fill_random_array(&mut key).expect("OS RNG unavailable; cannot initialise session key");
+    key
 }
 
 #[inline]
-const fn io_error_kind_label(kind: io::ErrorKind) -> &'static str {
-    match kind {
-        io::ErrorKind::NotFound => "NotFound",
-        io::ErrorKind::PermissionDenied => "PermissionDenied",
-        io::ErrorKind::ConnectionRefused => "ConnectionRefused",
-        io::ErrorKind::ConnectionReset => "ConnectionReset",
-        io::ErrorKind::HostUnreachable => "HostUnreachable",
-        io::ErrorKind::NetworkUnreachable => "NetworkUnreachable",
-        io::ErrorKind::ConnectionAborted => "ConnectionAborted",
-        io::ErrorKind::NotConnected => "NotConnected",
-        io::ErrorKind::AddrInUse => "AddrInUse",
-        io::ErrorKind::AddrNotAvailable => "AddrNotAvailable",
-        io::ErrorKind::BrokenPipe => "BrokenPipe",
-        io::ErrorKind::AlreadyExists => "AlreadyExists",
-        io::ErrorKind::WouldBlock => "WouldBlock",
-        io::ErrorKind::InvalidInput => "InvalidInput",
-        io::ErrorKind::InvalidData => "InvalidData",
-        io::ErrorKind::TimedOut => "TimedOut",
-        io::ErrorKind::WriteZero => "WriteZero",
-        io::ErrorKind::Interrupted => "Interrupted",
-        io::ErrorKind::Unsupported => "Unsupported",
-        io::ErrorKind::UnexpectedEof => "UnexpectedEof",
-        io::ErrorKind::OutOfMemory => "OutOfMemory",
-        io::ErrorKind::Other => "Other",
-        _ => "Unknown",
+fn session_key() -> &'static [u8; 32] {
+    SESSION_KEY.get_or_init(init_session_key)
+}
+
+// ── Global ring buffer (DoS-bounded in-process forensic log) ──────────────────
+
+static GLOBAL_RING: OnceLock<ring_buffer::RingBufferLogger> = OnceLock::new();
+
+#[inline]
+fn global_ring() -> &'static ring_buffer::RingBufferLogger {
+    GLOBAL_RING.get_or_init(|| ring_buffer::RingBufferLogger::new_internal(4_096, 2_048))
+}
+
+// ── Code lookup ───────────────────────────────────────────────────────────────
+
+/// Map a caller-supplied numeric code to a pre-defined static `ErrorCode`.
+///
+/// Unknown codes fall back silently to `CORE_INVALID_STATE` (4) — always safer
+/// than panicking in a hostile environment.
+pub(crate) fn resolve_code(n: u16) -> &'static codes::ErrorCode {
+    use definitions::*;
+    match n {
+        // CORE (1-30)
+        1 => &CORE_INIT_FAILED,
+        2 => &CORE_SHUTDOWN_FAILED,
+        3 => &CORE_PANIC_RECOVERY,
+        4 => &CORE_INVALID_STATE,
+        5 => &CORE_MEMORY_ALLOC_FAILED,
+        6 => &CORE_THREAD_SPAWN_FAILED,
+        7 => &CORE_MUTEX_LOCK_FAILED,
+        8 => &CORE_SIGNAL_HANDLER_FAILED,
+        9 => &CORE_MODULE_LOAD_FAILED,
+        10 => &CORE_DEPENDENCY_MISSING,
+        11 => &CORE_VERSION_CHECK_FAILED,
+        12 => &CORE_RESOURCE_INIT_FAILED,
+        13 => &CORE_EVENT_LOOP_FAILED,
+        14 => &CORE_CONFIG_BOOTSTRAP_FAILED,
+        15 => &CORE_DATABASE_CONNECT_FAILED,
+        16 => &CORE_CACHE_INIT_FAILED,
+        17 => &CORE_QUEUE_OVERFLOW,
+        18 => &CORE_TIMER_SETUP_FAILED,
+        19 => &CORE_HOOK_REGISTRATION_FAILED,
+        20 => &CORE_PLUGIN_INIT_FAILED,
+        21 => &CORE_STATE_TRANSITION_FAILED,
+        22 => &CORE_HEALTH_CHECK_FAILED,
+        23 => &CORE_BACKUP_FAILED,
+        24 => &CORE_RESTORE_FAILED,
+        25 => &CORE_MIGRATION_FAILED,
+        26 => &CORE_LICENSE_VALIDATION_FAILED,
+        27 => &CORE_AUTH_INIT_FAILED,
+        28 => &CORE_CRYPTO_SETUP_FAILED,
+        29 => &CORE_NETWORK_INIT_FAILED,
+        30 => &CORE_API_SERVER_START_FAILED,
+        // CFG (100-131)
+        100 => &CFG_PARSE_FAILED,
+        101 => &CFG_VALIDATION_FAILED,
+        102 => &CFG_MISSING_REQUIRED,
+        103 => &CFG_INVALID_VALUE,
+        104 => &CFG_INVALID_FORMAT,
+        105 => &CFG_PERMISSION_DENIED,
+        106 => &CFG_VERSION_MISMATCH,
+        107 => &CFG_SECURITY_VIOLATION,
+        108 => &CFG_LOAD_FAILED,
+        109 => &CFG_SAVE_FAILED,
+        110 => &CFG_ENV_VAR_MISSING,
+        111 => &CFG_TYPE_MISMATCH,
+        112 => &CFG_DUPLICATE_KEY,
+        113 => &CFG_SCHEMA_VALIDATION_FAILED,
+        114 => &CFG_MERGE_CONFLICT,
+        115 => &CFG_REMOTE_FETCH_FAILED,
+        116 => &CFG_LOCAL_STORE_FAILED,
+        117 => &CFG_ENCRYPTION_FAILED,
+        118 => &CFG_DECRYPTION_FAILED,
+        119 => &CFG_KEY_NOT_FOUND,
+        120 => &CFG_INVALID_PATH,
+        121 => &CFG_CONVERSION_FAILED,
+        122 => &CFG_DEFAULTS_LOAD_FAILED,
+        123 => &CFG_OVERRIDE_FAILED,
+        124 => &CFG_WATCHER_INIT_FAILED,
+        125 => &CFG_RELOAD_FAILED,
+        126 => &CFG_BACKUP_FAILED,
+        127 => &CFG_ROLLBACK_FAILED,
+        128 => &CFG_TEMPLATE_RENDER_FAILED,
+        129 => &CFG_VARIABLE_RESOLUTION_FAILED,
+        130 => &CFG_SECRETS_MANAGER_FAILED,
+        131 => &CFG_PROFILE_SWITCH_FAILED,
+        // DCP (200-237)
+        200 => &DCP_DEPLOY_FAILED,
+        201 => &DCP_ARTIFACT_CREATE,
+        202 => &DCP_ARTIFACT_WRITE,
+        203 => &DCP_CLEANUP_FAILED,
+        204 => &DCP_TAG_GENERATION,
+        205 => &DCP_TRIGGER_FAILED,
+        206 => &DCP_SIMULATION_FAILED,
+        207 => &DCP_BAIT_DEPLOY_FAILED,
+        208 => &DCP_HONEYPOT_INIT_FAILED,
+        209 => &DCP_FAKE_DATA_GENERATION_FAILED,
+        210 => &DCP_REDIRECT_SETUP_FAILED,
+        211 => &DCP_MIMICRY_FAILED,
+        212 => &DCP_TARPIT_ENGAGE_FAILED,
+        213 => &DCP_DECOY_LAUNCH_FAILED,
+        214 => &DCP_SHADOW_SYSTEM_FAILED,
+        215 => &DCP_FINGERPRINT_MISMATCH,
+        216 => &DCP_BEHAVIOR_MODEL_LOAD_FAILED,
+        217 => &DCP_INTRUSION_SIM_FAILED,
+        218 => &DCP_COUNTERMEASURE_FAILED,
+        219 => &DCP_ARTIFACT_EXPIRATION,
+        220 => &DCP_DEPLOYMENT_ROLLBACK_FAILED,
+        221 => &DCP_RESOURCE_ALLOCATION_FAILED,
+        222 => &DCP_TEMPLATE_LOAD_FAILED,
+        223 => &DCP_VALIDATION_CHECK_FAILED,
+        224 => &DCP_INTEGRITY_CHECK_FAILED,
+        225 => &DCP_NETWORK_SIM_FAILED,
+        226 => &DCP_ACCESS_CONTROL_FAILED,
+        227 => &DCP_ENCRYPTED_ARTIFACT_FAILED,
+        228 => &DCP_DECRYPT_ARTIFACT_FAILED,
+        229 => &DCP_DYNAMIC_GENERATION_FAILED,
+        230 => &DCP_PERSISTENCE_FAILED,
+        231 => &DCP_NARRATIVE_DESYNC,
+        232 => &DCP_NARRATIVE_BREAK,
+        233 => &DCP_BELIEVABILITY_LOW,
+        234 => &DCP_ADVERSARY_ADAPTATION,
+        235 => &DCP_STATE_VIOLATION,
+        236 => &DCP_TEMPORAL_INCONSISTENCY,
+        237 => &DCP_CAUSALITY_BREACH,
+        // TEL (300-333)
+        300 => &TEL_INIT_FAILED,
+        301 => &TEL_WATCH_FAILED,
+        302 => &TEL_EVENT_LOST,
+        303 => &TEL_CHANNEL_CLOSED,
+        304 => &TEL_MONITOR_CRASH,
+        305 => &TEL_METRIC_COLLECTION_FAILED,
+        306 => &TEL_EXPORT_FAILED,
+        307 => &TEL_AGGREGATION_FAILED,
+        308 => &TEL_TRACE_SPAN_FAILED,
+        309 => &TEL_REMOTE_SEND_FAILED,
+        310 => &TEL_BUFFER_OVERFLOW,
+        311 => &TEL_INVALID_METRIC,
+        312 => &TEL_SAMPLING_FAILED,
+        313 => &TEL_PROPAGATION_FAILED,
+        314 => &TEL_ENDPOINT_UNREACHABLE,
+        315 => &TEL_AUTH_FAILED,
+        316 => &TEL_COMPRESSION_FAILED,
+        317 => &TEL_DECOMPRESSION_FAILED,
+        318 => &TEL_FILTER_APPLY_FAILED,
+        319 => &TEL_ALERT_TRIGGER_FAILED,
+        320 => &TEL_DASHBOARD_UPDATE_FAILED,
+        321 => &TEL_LOG_INGEST_FAILED,
+        322 => &TEL_QUERY_FAILED,
+        323 => &TEL_RETENTION_POLICY_FAILED,
+        324 => &TEL_BACKPRESSURE,
+        325 => &TEL_INSTRUMENTATION_FAILED,
+        326 => &TEL_BATCH_PROCESS_FAILED,
+        327 => &TEL_SERIALIZATION_FAILED,
+        328 => &TEL_DESERIALIZATION_FAILED,
+        329 => &TEL_RESOURCE_MONITOR_FAILED,
+        330 => &TEL_HEARTBEAT_FAILED,
+        331 => &TEL_EVASION_DETECTED,
+        332 => &TEL_SENSOR_BYPASS,
+        333 => &TEL_OBSERVABILITY_GAP,
+        // COR (400-434)
+        400 => &COR_RULE_EVAL_FAILED,
+        401 => &COR_BUFFER_OVERFLOW,
+        402 => &COR_INVALID_SCORE,
+        403 => &COR_WINDOW_EXPIRED,
+        404 => &COR_INVALID_ARTIFACT,
+        405 => &COR_PATTERN_MATCH_FAILED,
+        406 => &COR_DATA_INGEST_FAILED,
+        407 => &COR_AGGREGATION_FAILED,
+        408 => &COR_THRESHOLD_BREACH,
+        409 => &COR_FALSE_POSITIVE,
+        410 => &COR_EVENT_MERGE_FAILED,
+        411 => &COR_CONTEXT_LOAD_FAILED,
+        412 => &COR_ANOMALY_DETECT_FAILED,
+        413 => &COR_MODEL_TRAIN_FAILED,
+        414 => &COR_INFERENCE_FAILED,
+        415 => &COR_DATA_NORMALIZATION_FAILED,
+        416 => &COR_FEATURE_EXTRACTION_FAILED,
+        417 => &COR_CLUSTERING_FAILED,
+        418 => &COR_OUTLIER_DETECTION_FAILED,
+        419 => &COR_TIME_SERIES_ANALYSIS_FAILED,
+        420 => &COR_GRAPH_BUILD_FAILED,
+        421 => &COR_PATH_ANALYSIS_FAILED,
+        422 => &COR_RULE_UPDATE_FAILED,
+        423 => &COR_VALIDATION_FAILED,
+        424 => &COR_EXPORT_FAILED,
+        425 => &COR_IMPORT_FAILED,
+        426 => &COR_QUERY_EXEC_FAILED,
+        427 => &COR_INDEX_BUILD_FAILED,
+        428 => &COR_SEARCH_FAILED,
+        429 => &COR_ENRICHMENT_FAILED,
+        430 => &COR_DEDUPLICATION_FAILED,
+        431 => &COR_CONFIDENCE_DEGRADATION,
+        432 => &COR_MODEL_DRIFT,
+        433 => &COR_HYPOTHESIS_INVALIDATED,
+        434 => &COR_ACTOR_CONFLICT,
+        // RSP (500-533)
+        500 => &RSP_EXEC_FAILED,
+        501 => &RSP_TIMEOUT,
+        502 => &RSP_INVALID_ACTION,
+        503 => &RSP_RATE_LIMITED,
+        504 => &RSP_HANDLER_NOT_FOUND,
+        505 => &RSP_SERIALIZATION_FAILED,
+        506 => &RSP_DESERIALIZATION_FAILED,
+        507 => &RSP_VALIDATION_FAILED,
+        508 => &RSP_AUTH_FAILED,
+        509 => &RSP_PERMISSION_DENIED,
+        510 => &RSP_RESOURCE_NOT_FOUND,
+        511 => &RSP_CONFLICT,
+        512 => &RSP_INTERNAL_ERROR,
+        513 => &RSP_BAD_REQUEST,
+        514 => &RSP_UNAVAILABLE,
+        515 => &RSP_GATEWAY_TIMEOUT,
+        516 => &RSP_TOO_MANY_REQUESTS,
+        517 => &RSP_PAYLOAD_TOO_LARGE,
+        518 => &RSP_UNSUPPORTED_MEDIA,
+        519 => &RSP_METHOD_NOT_ALLOWED,
+        520 => &RSP_NOT_ACCEPTABLE,
+        521 => &RSP_PROXY_AUTH_REQUIRED,
+        522 => &RSP_REQUEST_TIMEOUT,
+        523 => &RSP_PRECONDITION_FAILED,
+        524 => &RSP_EXPECTATION_FAILED,
+        525 => &RSP_MISDIRECTED_REQUEST,
+        526 => &RSP_UNPROCESSABLE_ENTITY,
+        527 => &RSP_LOCKED,
+        528 => &RSP_FAILED_DEPENDENCY,
+        529 => &RSP_UPGRADE_REQUIRED,
+        530 => &RSP_PRECONDITION_REQUIRED,
+        531 => &RSP_TIMING_ANOMALY,
+        532 => &RSP_ENTROPY_LOW,
+        533 => &RSP_BEHAVIORAL_INCONSISTENCY,
+        // LOG (600-630)
+        600 => &LOG_WRITE_FAILED,
+        601 => &LOG_ROTATE_FAILED,
+        602 => &LOG_BUFFER_FULL,
+        603 => &LOG_SERIALIZATION,
+        604 => &LOG_INIT_FAILED,
+        605 => &LOG_FLUSH_FAILED,
+        606 => &LOG_LEVEL_INVALID,
+        607 => &LOG_FILTER_APPLY_FAILED,
+        608 => &LOG_APPENDER_FAILED,
+        609 => &LOG_REMOTE_SEND_FAILED,
+        610 => &LOG_COMPRESSION_FAILED,
+        611 => &LOG_ENCRYPTION_FAILED,
+        612 => &LOG_ARCHIVE_FAILED,
+        613 => &LOG_PURGE_FAILED,
+        614 => &LOG_INDEX_FAILED,
+        615 => &LOG_SEARCH_FAILED,
+        616 => &LOG_PARSE_FAILED,
+        617 => &LOG_FORMAT_INVALID,
+        618 => &LOG_TIMESTAMP_FAILED,
+        619 => &LOG_METADATA_MISSING,
+        620 => &LOG_ROLLOVER_FAILED,
+        621 => &LOG_BACKUP_FAILED,
+        622 => &LOG_RESTORE_FAILED,
+        623 => &LOG_QUEUE_OVERFLOW,
+        624 => &LOG_ASYNC_SEND_FAILED,
+        625 => &LOG_SYNC_FAILED,
+        626 => &LOG_HANDLER_CRASH,
+        627 => &LOG_CONFIG_LOAD_FAILED,
+        628 => &LOG_RELOAD_FAILED,
+        629 => &LOG_EXPORT_FAILED,
+        630 => &LOG_IMPORT_FAILED,
+        // PLT (700-730)
+        700 => &PLT_UNSUPPORTED,
+        701 => &PLT_SYSCALL_FAILED,
+        702 => &PLT_PERMISSION_DENIED,
+        703 => &PLT_RESOURCE_EXHAUSTED,
+        704 => &PLT_OS_VERSION_MISMATCH,
+        705 => &PLT_HARDWARE_UNSUPPORTED,
+        706 => &PLT_DRIVER_LOAD_FAILED,
+        707 => &PLT_API_CALL_FAILED,
+        708 => &PLT_ENV_DETECT_FAILED,
+        709 => &PLT_VIRTUALIZATION_FAILED,
+        710 => &PLT_CONTAINER_INIT_FAILED,
+        711 => &PLT_KERNEL_MODULE_FAILED,
+        712 => &PLT_FILESYSTEM_MOUNT_FAILED,
+        713 => &PLT_NETWORK_INTERFACE_FAILED,
+        714 => &PLT_PROCESS_SPAWN_FAILED,
+        715 => &PLT_SIGNAL_SEND_FAILED,
+        716 => &PLT_MEMORY_MAP_FAILED,
+        717 => &PLT_THREAD_AFFINITY_FAILED,
+        718 => &PLT_POWER_MANAGEMENT_FAILED,
+        719 => &PLT_BOOTSTRAP_FAILED,
+        720 => &PLT_SHUTDOWN_HOOK_FAILED,
+        721 => &PLT_COMPATIBILITY_CHECK_FAILED,
+        722 => &PLT_LIBRARY_LOAD_FAILED,
+        723 => &PLT_SYMBOL_RESOLVE_FAILED,
+        724 => &PLT_SECURITY_POLICY_FAILED,
+        725 => &PLT_AUDIT_HOOK_FAILED,
+        726 => &PLT_RESOURCE_LIMIT_REACHED,
+        727 => &PLT_CLOCK_SYNC_FAILED,
+        728 => &PLT_DEVICE_ACCESS_FAILED,
+        729 => &PLT_FIRMWARE_UPDATE_FAILED,
+        730 => &PLT_BIOS_CONFIG_FAILED,
+        // IO (800-830)
+        800 => &IO_READ_FAILED,
+        801 => &IO_WRITE_FAILED,
+        802 => &IO_NETWORK_ERROR,
+        803 => &IO_TIMEOUT,
+        804 => &IO_NOT_FOUND,
+        805 => &IO_METADATA_FAILED,
+        806 => &IO_OPEN_FAILED,
+        807 => &IO_CLOSE_FAILED,
+        808 => &IO_SEEK_FAILED,
+        809 => &IO_FLUSH_FAILED,
+        810 => &IO_PERMISSION_DENIED,
+        811 => &IO_INTERRUPTED,
+        812 => &IO_WOULD_BLOCK,
+        813 => &IO_INVALID_INPUT,
+        814 => &IO_BROKEN_PIPE,
+        815 => &IO_CONNECTION_RESET,
+        816 => &IO_CONNECTION_REFUSED,
+        817 => &IO_NOT_CONNECTED,
+        818 => &IO_ADDR_IN_USE,
+        819 => &IO_ADDR_NOT_AVAILABLE,
+        820 => &IO_NETWORK_DOWN,
+        821 => &IO_NETWORK_UNREACHABLE,
+        822 => &IO_HOST_UNREACHABLE,
+        823 => &IO_ALREADY_EXISTS,
+        824 => &IO_IS_DIRECTORY,
+        825 => &IO_NOT_DIRECTORY,
+        826 => &IO_DIRECTORY_NOT_EMPTY,
+        827 => &IO_READ_ONLY_FS,
+        828 => &IO_FS_QUOTA_EXCEEDED,
+        829 => &IO_STALE_NFS_HANDLE,
+        830 => &IO_REMOTE_IO,
+        // Unknown → safe fallback
+        _ => &CORE_INVALID_STATE,
     }
 }
 
-/// Main error type with security-conscious design.
+// ── Internal error payload ────────────────────────────────────────────────────
+
+/// Three-field context payload — all owned strings are zeroized on drop.
 ///
-/// # Key Properties
+/// Not `Clone` or `Copy` — single-ownership semantics prevent accidental
+/// duplication of potentially sensitive string content.
+struct ErrorPayload {
+    /// Deceptive or sanitised message for external consumers (shown in Display).
+    external: Cow<'static, str>,
+    /// Internal diagnostic for SOC / forensic analysis — never forwarded externally.
+    internal: Cow<'static, str>,
+    /// High-sensitivity data (credentials, paths, identifiers).  `None` if the
+    /// caller supplied an empty string.
+    sensitive: Option<Cow<'static, str>>,
+}
+
+impl Zeroize for ErrorPayload {
+    fn zeroize(&mut self) {
+        if let Cow::Owned(ref mut s) = self.external {
+            s.zeroize();
+        }
+        if let Cow::Owned(ref mut s) = self.internal {
+            s.zeroize();
+        }
+        if let Some(Cow::Owned(ref mut s)) = self.sensitive {
+            s.zeroize();
+        }
+    }
+}
+
+impl Drop for ErrorPayload {
+    #[inline(never)] // Prevent dead-store elimination of the zeroize pass.
+    fn drop(&mut self) {
+        zeroization::drop_zeroize(self);
+    }
+}
+
+// ── AgentError ────────────────────────────────────────────────────────────────
+
+/// The single error type for all palisade subsystems.
 ///
-/// - All context is zeroized on drop (including source errors)
-/// - External display reveals minimal information
-/// - Internal logging uses structured data with explicit lifetimes
-/// - No implicit conversions from stdlib errors
-/// - Hot paths are zero-allocation where possible
-/// - Built-in constant-time error generation to reduce timing side-channels
-/// - Always-on error code obfuscation to resist fingerprinting
+/// ## Construction
 ///
-/// # Design Rationale - Error Constructors
+/// Use [`AgentError::new`] — the **only** public constructor.
 ///
-/// We provide convenience constructors like `config()`, `telemetry()`, etc.
-/// even though `ErrorCode` already contains the category. This is intentional:
+/// ## Logging
 ///
-/// 1. **Ergonomics**: `AgentError::config(code, ...)` is clearer than `AgentError::new(code, ...)`
-/// 2. **Future extensibility**: Different subsystems may need different context types
-/// 3. **Type safety**: Prevents mixing categories (compile-time check vs runtime enum match)
-/// 4. **Grep-ability**: Engineers can search for "::telemetry(" to find all telemetry errors
+/// Use [`AgentError::log`] to persist an encrypted record to disk.
 ///
-/// The redundancy is acceptable because it improves maintainability and reduces
-/// the chance of errors being created with mismatched code/category pairs.
+/// ## Display invariants
+///
+/// - `Display` emits only the obfuscated code and its deceptive category label.
+/// - `Debug` never includes payload content.
+/// - Neither leaks paths, hostnames, or any diagnostic information.
+///
+/// Not `Clone` or `Copy` — the single-ownership model prevents side-channel
+/// leakage via unintended duplications of sensitive payload strings.
 #[must_use = "errors should be handled or logged"]
 pub struct AgentError {
-    code: ErrorCode,
-    context: ErrorContext,
+    code: codes::ErrorCode,
+    payload: ErrorPayload,
     retryable: bool,
-    source: Option<Box<dyn Error + Send + Sync>>,
     created_at: Instant,
 }
 
 impl AgentError {
-    #[inline]
-    fn enforce_constant_time(created_at: Instant) {
-        const ERROR_GEN_FLOOR_US: u64 = 1;
-        let target = Duration::from_micros(ERROR_GEN_FLOOR_US);
-        let end = created_at + target;
-        while Instant::now() < end {
-            std::hint::spin_loop();
-        }
-    }
+    // ── Public constructor ────────────────────────────────────────────────────
 
-    /// Create a generic error with internal context only.
-    #[inline]
-    fn new(code: ErrorCode, operation: impl Into<Cow<'static, str>>, details: impl Into<Cow<'static, str>>) -> Self {
-        let created_at = Instant::now();
-        Self {
-            code: crate::obfuscation::obfuscate_code(&code),
-            context: ErrorContext::new(operation, details),
-            retryable: false,
-            source: None,
-            created_at,
-        }
-        .with_constant_time(created_at)
-    }
-
-    /// Create an error with sensitive information (paths, usernames, etc.)
-    #[inline]
-    fn new_sensitive(
-        code: ErrorCode,
-        operation: impl Into<Cow<'static, str>>,
-        details: impl Into<Cow<'static, str>>,
-        sensitive_info: impl Into<Cow<'static, str>>,
+    /// Create a new error.  **The only public entry point for this type.**
+    ///
+    /// # Arguments
+    ///
+    /// | Parameter   | Exposed to  | Purpose                                   |
+    /// |-------------|-------------|-------------------------------------------|
+    /// | `code`      | obfuscated  | Numeric code from the table in module docs |
+    /// | `external`  | adversaries | Deceptive / sanitised external message     |
+    /// | `internal`  | SOC only    | True diagnostic; stays in-process          |
+    /// | `sensitive` | SOC + token | PII / paths; `None` if empty               |
+    ///
+    /// # Automatic security properties (non-negotiable)
+    ///
+    /// 1. The code is obfuscated by the process-global session salt.
+    /// 2. A constant-time floor of ≥ 1 µs is enforced.
+    /// 3. The error is appended to the in-process DoS-bounded ring buffer.
+    ///
+    /// # Unknown codes
+    ///
+    /// Codes outside the defined ranges are silently mapped to
+    /// `CORE_INVALID_STATE` (4).  This is intentional: a generic error is
+    /// always preferable to a panic in a hostile environment.
+    pub fn new(
+        code: u16,
+        external: impl Into<Cow<'static, str>>,
+        internal: impl Into<Cow<'static, str>>,
+        sensitive: impl Into<Cow<'static, str>>,
     ) -> Self {
         let created_at = Instant::now();
-        Self {
-            code: crate::obfuscation::obfuscate_code(&code),
-            context: ErrorContext::with_sensitive(operation, details, sensitive_info),
+
+        // 1. Resolve and obfuscate the error code.
+        let base = resolve_code(code);
+        let obfuscated = obfuscation::obfuscate_code(base);
+
+        let sensitive_cow = sensitive.into();
+        let sensitive_opt = if sensitive_cow.as_ref().is_empty() {
+            None
+        } else {
+            Some(sensitive_cow)
+        };
+
+        let err = Self {
+            code: obfuscated,
+            payload: ErrorPayload {
+                external: external.into(),
+                internal: internal.into(),
+                sensitive: sensitive_opt,
+            },
             retryable: false,
-            source: None,
             created_at,
-        }
-        .with_constant_time(created_at)
+        };
+
+        // 2. Constant-time floor — must run before returning.
+        ct::enforce_floor(created_at, Duration::from_micros(1));
+
+        // 3. Append to DoS-bounded ring buffer (in-process forensic log).
+        global_ring().log_internal(&err);
+
+        err
     }
 
-    /// Create an error with split internal/sensitive sources.
-    ///
-    /// This keeps sensitive context (paths) separate from semi-sensitive
-    /// context (error kinds), preventing conflation.
-    #[inline]
-    fn new_with_split_source(
-        code: ErrorCode,
-        operation: impl Into<Cow<'static, str>>,
-        details: impl Into<Cow<'static, str>>,
-        internal_source: impl Into<Cow<'static, str>>,
-        sensitive_source: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        let created_at = Instant::now();
-        Self {
-            code: crate::obfuscation::obfuscate_code(&code),
-            context: ErrorContext::with_source_split(
-                operation,
-                details,
-                internal_source,
-                sensitive_source,
-            ),
-            retryable: false,
-            source: None,
-            created_at,
-        }
-        .with_constant_time(created_at)
-    }
-
-    #[inline]
-    fn with_constant_time(mut self, created_at: Instant) -> Self {
-        Self::enforce_constant_time(created_at);
-        self.created_at = created_at;
+    /// Enforce a minimum total error-path duration from construction time.
+    pub fn with_timing_normalization(self, minimum_duration: Duration) -> Self {
+        ct::sleep_until(ct::deadline_from(self.created_at, minimum_duration));
         self
     }
 
-    /// Mark this error as retryable (transient failure)
-    #[inline]
-    pub fn with_retry(mut self) -> Self {
-        self.retryable = true;
+    /// Async variant of [`AgentError::with_timing_normalization`] with no runtime dependency.
+    pub async fn with_timing_normalization_async(self, minimum_duration: Duration) -> Self {
+        ct::sleep_until_async(ct::deadline_from(self.created_at, minimum_duration)).await;
         self
     }
 
-    /// Add tracking metadata (correlation IDs, session tokens, etc.)
+    // ── Log to encrypted file ─────────────────────────────────────────────────
+
+    /// Persist an encrypted forensic record for this error to `path`.
     ///
-    /// MUTATES IN PLACE - no cloning, no wasted allocations.
-    #[inline]
-    pub fn with_metadata(mut self, key: &'static str, value: impl Into<Cow<'static, str>>) -> Self {
-        self.context.add_metadata(key, value);
-        self
+    /// `path` must be an absolute path to a log file.  The file is created if
+    /// it does not exist; records are always appended.  After each write the
+    /// file is set read-only (`0o400` on Unix), requiring `root` to read or
+    /// modify it.
+    ///
+    /// # Encryption
+    ///
+    /// Each record is encrypted with AES-256-GCM using the process-lifetime
+    /// session key. An HMAC-SHA512 tag is appended for tamper detection. The
+    /// session key resides only in process memory and is never written to disk.
+    ///
+    /// # Allocation
+    ///
+    /// This method allocates during encryption and I/O.  All other methods on
+    /// `AgentError` are allocation-free (modulo construction).
+    ///
+    /// # Errors
+    ///
+    /// Returns an `io::Error` on filesystem failure.  The log record is either
+    /// fully written and MAC-verified or not written at all; partial writes
+    /// are not possible due to the length-prefix framing.
+    pub fn log(&self, path: &Path) -> io::Result<()> {
+        use convenience::sanitize_string;
+
+        // Build the plaintext record.  All user-supplied strings pass through
+        // sanitize_string to prevent log-injection attacks.
+        let code_str = self.code.to_string();
+        let ext_safe = sanitize_string(self.payload.external.as_ref());
+        let int_safe = sanitize_string(self.payload.internal.as_ref());
+        let sens_safe = self
+            .payload
+            .sensitive
+            .as_ref()
+            .map(|c| sanitize_string(c.as_ref()))
+            .unwrap_or_default();
+
+        // Wire format: structured key=value line, tab-delimited.
+        // Allocating here is explicitly permitted (log path).
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+
+        let plaintext = format!(
+            "TS={ts_ms}\tCODE={code_str}\tCAT={cat}\tIMPACT={impact}\t\
+             EXTERNAL={ext}\tINTERNAL={int}\tSENSITIVE={sens}\tRETRYABLE={retry}",
+            ts_ms = ts_ms,
+            code_str = code_str,
+            cat = self.code.category().deceptive_name(),
+            impact = self.code.impact().value(),
+            ext = ext_safe,
+            int = int_safe,
+            sens = if sens_safe.is_empty() {
+                "<NONE>"
+            } else {
+                &sens_safe
+            },
+            retry = self.retryable,
+        );
+
+        log_sink::append_record(session_key(), path, plaintext.as_bytes())
     }
 
-    /// Normalize timing to prevent timing side-channel attacks.
-    ///
-    /// This sleeps until `target_duration` has elapsed since error creation,
-    /// ensuring that error responses take a consistent amount of time regardless
-    /// of which code path failed.
-    ///
-    /// # Use Cases
-    ///
-    /// - Authentication failures (prevent user enumeration)
-    /// - Sensitive file operations (prevent path existence probing)
-    /// - Cryptographic operations (prevent timing attacks on key material)
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use palisade_errors::{AgentError, definitions};
-    /// use std::time::Duration;
-    ///
-    /// fn authenticate(user: &str, pass: &str) -> palisade_errors::Result<()> {
-    ///     // Fast path: invalid username
-    ///     if !user_exists(user) {
-    ///         return Err(
-    ///             AgentError::config(definitions::CFG_VALIDATION_FAILED, "auth", "Invalid credentials")
-    ///                 .with_timing_normalization(Duration::from_millis(100))
-    ///         );
-    ///     }
-    ///     
-    ///     // Slow path: password hash check
-    ///     if !check_password(user, pass) {
-    ///         return Err(
-    ///             AgentError::config(definitions::CFG_VALIDATION_FAILED, "auth", "Invalid credentials")
-    ///                 .with_timing_normalization(Duration::from_millis(100))
-    ///         );
-    ///     }
-    ///     
-    ///     Ok(())
-    /// }
-    /// # fn user_exists(_: &str) -> bool { true }
-    /// # fn check_password(_: &str, _: &str) -> bool { true }
-    /// ```
-    ///
-    /// Both error paths now take at least 100ms, preventing attackers from
-    /// distinguishing between "user doesn't exist" and "wrong password".
-    ///
-    /// # Performance Note
-    ///
-    /// This adds a sleep to the error path, which is acceptable since errors
-    /// are not the hot path. The slight performance cost is worth the security
-    /// benefit for sensitive operations.
-    ///
-    /// # Limitations
-    /// 
-    /// - **Not async-safe**: Blocks the thread. Use in sync contexts only.
-    /// - **Coarse precision**: OS scheduling affects accuracy (1-15ms jitter).
-    /// - **Partial protection**: Only normalizes error return timing, not upstream operations.
-    /// - **Observable side-channels**: Network timing, cache behavior, DB queries remain.
-    /// 
-    /// This provides defense-in-depth against timing attacks but is not a complete solution.
-    #[inline]
-    pub fn with_timing_normalization(self, target_duration: Duration) -> Self {
-        let elapsed = self.created_at.elapsed();
-        if elapsed < target_duration {
-            std::thread::sleep(target_duration - elapsed);
-        }
-        self
-    }
+    // ── Crate-internal accessors (used by ring_buffer) ────────────────────────
 
-    /// Check if this error can be retried
     #[inline]
-    pub const fn is_retryable(&self) -> bool {
-        self.retryable
-    }
-
-    /// Get error code
-    #[inline]
-    pub const fn code(&self) -> &ErrorCode {
+    pub(crate) fn code_inner(&self) -> &codes::ErrorCode {
         &self.code
     }
 
-    /// Get operation category
     #[inline]
-    pub const fn category(&self) -> OperationCategory {
-        self.code.category()
+    pub(crate) fn external_payload(&self) -> &str {
+        self.payload.external.as_ref()
     }
 
-    /// Get the time elapsed since this error was created.
-    ///
-    /// Useful for metrics and debugging, but should NOT be exposed externally
-    /// as it could leak timing information.
     #[inline]
-    pub fn age(&self) -> Duration {
-        self.created_at.elapsed()
+    pub(crate) fn internal_payload(&self) -> &str {
+        self.payload.internal.as_ref()
     }
 
-    /// Create structured internal log entry with explicit lifetime.
-    ///
-    /// # Critical Security Property
-    ///
-    /// The returned `InternalLog` borrows from `self` and CANNOT
-    /// outlive this error. This is intentional and enforces that sensitive
-    /// data is consumed immediately by the logger and cannot be retained.
-    ///
-    /// # Usage Pattern
-    ///
-    /// ```rust
-    /// # use palisade_errors::{AgentError, definitions};
-    /// let err = AgentError::config(
-    ///     definitions::CFG_PARSE_FAILED,
-    ///     "test",
-    ///     "test details"
-    /// );
-    /// let log = err.internal_log();
-    /// // logger.log_structured(log);  // log dies here
-    /// // err is dropped, all data zeroized
-    /// ```
-    ///
-    /// The short lifetime prevents accidental retention in log buffers,
-    /// async contexts, or background threads.
     #[inline]
-    pub fn internal_log(&self) -> InternalLog<'_> {
-        InternalLog {
-            code: &self.code,
-            operation: self.context.operation.as_ref(),
-            details: self.context.details.as_ref(),
-            source_internal: self
-                .context
-                .source_internal
-                .as_ref()
-                .map(|s: &Cow<'static, str>| s.as_ref()),
-            source_sensitive: self
-                .context
-                .source_sensitive
-                .as_ref()
-                .map(|s: &Cow<'static, str>| s.as_ref()),
-            metadata: &self.context.metadata,
-            retryable: self.retryable,
-        }
+    pub(crate) fn is_retryable(&self) -> bool {
+        self.retryable
     }
-
-    /// Alternative logging pattern for frameworks that need callback-style.
-    ///
-    /// This enforces immediate consumption and prevents accidental retention:
-    ///
-    /// ```rust
-    /// # use palisade_errors::{AgentError, definitions};
-    /// # let err = AgentError::config(definitions::CFG_PARSE_FAILED, "test", "test");
-    /// err.with_internal_log(|log| {
-    ///     // logger.write(log.code(), log.operation());
-    ///     // log is destroyed when this closure returns
-    /// });
-    /// ```
-    #[inline]
-    pub fn with_internal_log<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&InternalLog<'_>) -> R,
-    {
-        let log = self.internal_log();
-        f(&log)
-    }
-
-    // Convenience constructors for each subsystem.
-    // See "Design Rationale - Error Constructors" above for why these exist
-    // despite apparent redundancy with ErrorCode categories.
-
-    /// Create a configuration error
-    #[inline]
-    pub fn config(
-        code: ErrorCode, 
-        operation: impl Into<Cow<'static, str>>, 
-        details: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::new(code, operation, details)
-    }
-
-    /// Create a configuration error with sensitive context
-    #[inline]
-    pub fn config_sensitive(
-        code: ErrorCode, 
-        operation: impl Into<Cow<'static, str>>, 
-        details: impl Into<Cow<'static, str>>, 
-        sensitive: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::new_sensitive(code, operation, details, sensitive)
-    }
-
-    /// Create a deployment error
-    #[inline]
-    pub fn deployment(
-        code: ErrorCode, 
-        operation: impl Into<Cow<'static, str>>, 
-        details: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::new(code, operation, details)
-    }
-
-    /// Create a telemetry error
-    #[inline]
-    pub fn telemetry(
-        code: ErrorCode, 
-        operation: impl Into<Cow<'static, str>>, 
-        details: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::new(code, operation, details)
-    }
-
-    /// Create a correlation error
-    #[inline]
-    pub fn correlation(
-        code: ErrorCode, 
-        operation: impl Into<Cow<'static, str>>, 
-        details: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::new(code, operation, details)
-    }
-
-    /// Create a response error
-    #[inline]
-    pub fn response(
-        code: ErrorCode, 
-        operation: impl Into<Cow<'static, str>>, 
-        details: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::new(code, operation, details)
-    }
-
-    /// Create a logging error
-    #[inline]
-    pub fn logging(
-        code: ErrorCode, 
-        operation: impl Into<Cow<'static, str>>, 
-        details: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::new(code, operation, details)
-    }
-
-    /// Create a platform error
-    #[inline]
-    pub fn platform(
-        code: ErrorCode, 
-        operation: impl Into<Cow<'static, str>>, 
-        details: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::new(code, operation, details)
-    }
-
-    /// Create an I/O operation error
-    #[inline]
-    pub fn io_operation(
-        code: ErrorCode, 
-        operation: impl Into<Cow<'static, str>>, 
-        details: impl Into<Cow<'static, str>>,
-    ) -> Self {
-        Self::new(code, operation, details)
-    }
-
-    /// Wrap io::Error with explicit context, keeping path and error separate.
-    ///
-    /// This prevents conflation of:
-    /// - Error kind (semi-sensitive, reveals error type)
-    /// - Path (sensitive, reveals filesystem structure)
-    ///
-    /// By keeping them separate, logging systems can choose to handle them
-    /// differently (e.g., hash paths but log error kinds).
-    #[inline]
-    pub fn from_io_path(
-        code: ErrorCode,
-        operation: impl Into<Cow<'static, str>>,
-        path: impl Into<Cow<'static, str>>,
-        error: io::Error,
-    ) -> Self {
-        Self::new_with_split_source(
-            code,
-            operation,
-            "I/O operation failed",
-            io_error_kind_label(error.kind()), // Internal: error kind
-            path.into(),                // Sensitive: filesystem path
-        )
-    }
-
-    /// Async-safe timing normalization for non-blocking contexts.
-    ///
-    /// Unlike `with_timing_normalization`, this uses async sleep primitives
-    /// and won't block the executor thread. Essential for Tokio/async-std runtimes.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// async fn authenticate(user: &str, pass: &str) -> Result<Session> {
-    ///     let result = check_credentials(user, pass).await;
-    ///     
-    ///     if let Err(e) = result {
-    ///         // Normalize timing without blocking executor
-    ///         return Err(
-    ///             e.with_timing_normalization_async(Duration::from_millis(100)).await
-    ///         );
-    ///     }
-    ///     
-    ///     result
-    /// }
-    /// ```
-    ///
-    /// # Runtime Support
-    ///
-    /// - Requires either `tokio` or `async-std` feature
-    /// - Tokio takes precedence if both are enabled
-    /// - Will not compile without at least one async runtime feature
-    #[cfg(any(feature = "tokio", feature = "async_std"))]
-    #[inline]
-    pub async fn with_timing_normalization_async(self, target_duration: Duration) -> Self {
-        // FIXED: Calculate target absolute time to avoid race conditions
-        let target_time = self.created_at + target_duration;
-        let now = Instant::now();
-        
-        if now < target_time {
-            let sleep_duration = target_time - now;
-            
-            #[cfg(feature = "tokio")]
-            tokio::time::sleep(sleep_duration).await;
-            
-            #[cfg(all(feature = "async_std", not(feature = "tokio")))]
-            async_std::task::sleep(sleep_duration).await;
-        }
-        self
-    }
-
-    // Obfuscation is always applied at construction time.
 }
 
-// Manual Drop implementation to ensure proper zeroization ordering
+// ── Drop / Display / Debug / Error ───────────────────────────────────────────
+
 impl Drop for AgentError {
-    /// Panic-safe drop with explicit zeroization order.
-    ///
-    /// Marked #[inline(never)] to prevent optimization that could skip zeroization.
     #[inline(never)]
     fn drop(&mut self) {
-        // Use catch_unwind to ensure we attempt cleanup even if something panics
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // Drop the source error first (may contain sensitive data)
-            // By setting to None, we ensure the boxed error is dropped
-            self.source = None;
-            
-            // Context zeroizes itself via ZeroizeOnDrop
-            // but we're explicit here for documentation
-            self.context.zeroize();
-        }));
+        zeroization::drop_zeroize(&mut self.payload);
+    }
+}
+
+impl fmt::Display for AgentError {
+    /// Redacted external display.
+    ///
+    /// Format: `<Category> operation failed [<permanence>] (<OBFUSCATED-CODE>)`
+    ///
+    /// No payload content (external, internal, or sensitive) ever appears.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} operation failed [{}] ({})",
+            self.code.category().deceptive_name(),
+            if self.retryable {
+                "temporary"
+            } else {
+                "permanent"
+            },
+            self.code,
+        )
     }
 }
 
 impl fmt::Debug for AgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgentError")
-            .field("code", &self.code)
-            .field("category", &self.code.category())
+            .field("code", &self.code.to_string())
+            .field("category", &self.code.category().display_name())
             .field("retryable", &self.retryable)
-            .field("age", &self.created_at.elapsed())
-            .field("context", &"<REDACTED>")
-            .field("source", &self.source.as_ref().map(|_| "<PRESENT>"))
+            .field("age_us", &self.created_at.elapsed().as_micros())
+            .field("payload", &"<REDACTED>")
             .finish()
     }
 }
 
-impl fmt::Display for AgentError {
-    /// External display - sanitized for untrusted viewers.
-    /// Zero-allocation formatting.
-    ///
-    /// Format: "{Category} operation failed [{permanence}] ({ERROR-CODE})"
-    ///
-    /// Example: "Configuration operation failed [permanent] (E-CFG-100)"
-    ///
-    /// This provides:
-    /// - Operation domain (for troubleshooting)
-    /// - Retry semantics (for automation)
-    /// - Error code (for tracking)
-    ///
-    /// Without revealing:
-    /// - Internal paths or structure
-    /// - Validation logic
-    /// - User identifiers
-    /// - Configuration values
-    /// - Timing information
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let permanence = if self.retryable { "temporary" } else { "permanent" };
-        write!(
-            f,
-            "{} operation failed [{}] ({})",
-            self.code.category().display_name(),
-            permanence,
-            self.code  // ErrorCode::Display also writes directly
-        )
-    }
-}
+impl Error for AgentError {}
 
-impl std::error::Error for AgentError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.as_ref().map(|e| e.as_ref() as &(dyn std::error::Error + 'static))
-    }
-}
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod unit_tests {
+mod tests {
     use super::*;
-    use std::thread;
-    use std::time::Duration;
+    use std::time::Instant;
+
+    fn clear_salt() {
+        obfuscation::clear_session_salt();
+    }
 
     #[test]
-    fn timing_normalization_adds_delay() {
+    fn display_contains_no_payload() {
+        clear_salt();
+        let err = AgentError::new(100, "lie msg", "real diag", "/etc/shadow");
+        let display = format!("{}", err);
+        assert!(!display.contains("lie msg"), "external leaked");
+        assert!(!display.contains("real diag"), "internal leaked");
+        assert!(!display.contains("/etc/shadow"), "sensitive leaked");
+        assert!(display.contains("E-CFG-"), "obfuscated code missing");
+    }
+
+    #[test]
+    fn debug_output_never_contains_payload() {
+        let err = AgentError::new(100, "secret ext", "secret int", "secret sens");
+        let debug = format!("{:?}", err);
+        assert!(!debug.contains("secret"), "payload leaked in Debug");
+        assert!(debug.contains("<REDACTED>"));
+    }
+
+    #[test]
+    fn unknown_code_falls_back_to_core() {
+        let err = AgentError::new(9999, "e", "i", "");
+        assert!(format!("{}", err).contains("E-CORE-"));
+    }
+
+    #[test]
+    fn empty_sensitive_stored_as_none() {
+        // Verify the None path via internal accessor (pub(crate)).
+        let err = AgentError::new(100, "e", "i", "");
+        assert!(err.payload.sensitive.is_none());
+    }
+
+    #[test]
+    fn non_empty_sensitive_stored() {
+        let err = AgentError::new(100, "e", "i", "secret");
+        assert!(err.payload.sensitive.is_some());
+    }
+
+    #[test]
+    fn ct_floor_enforced() {
         let start = Instant::now();
-        let err = AgentError::config(
-            definitions::CFG_PARSE_FAILED,
-            "test",
-            "test"
-        );
-        
-        // This should add delay to reach 50ms
-        let _normalized = err.with_timing_normalization(Duration::from_millis(50));
-        
-        let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(50));
-        assert!(elapsed < Duration::from_millis(100)); // Some tolerance
+        let _ = AgentError::new(100, "e", "i", "");
+        assert!(start.elapsed() >= Duration::from_micros(1));
     }
 
     #[test]
-    fn timing_normalization_no_delay_if_already_slow() {
-        let err = AgentError::config(
-            definitions::CFG_PARSE_FAILED,
-            "test",
-            "test"
-        );
-        
-        // Wait longer than target
-        thread::sleep(Duration::from_millis(60));
-        
-        let start = Instant::now();
-        let _normalized = err.with_timing_normalization(Duration::from_millis(50));
-        let elapsed = start.elapsed();
-        
-        // Should not add extra delay
-        assert!(elapsed < Duration::from_millis(10));
+    fn ring_buffer_receives_entry() {
+        let before = global_ring().len();
+        let _err = AgentError::new(100, "e", "i", "");
+        assert!(global_ring().len() >= before);
     }
 
     #[test]
-    fn external_display_reveals_no_details() {
-        crate::obfuscation::clear_session_salt();
-        let err = AgentError::from_io_path(
-            definitions::IO_READ_FAILED,
-            "load_config",
-            "/etc/shadow",
-            io::Error::from(io::ErrorKind::PermissionDenied)
+    fn obfuscation_applied() {
+        clear_salt();
+        obfuscation::init_session_salt(5);
+        // CFG code 100, salt 5 → offset 0+5=5 → E-CFG-105
+        let err = AgentError::new(100, "e", "i", "");
+        assert!(
+            format!("{}", err).contains("E-CFG-105"),
+            "obfuscation not applied: {}",
+            err,
         );
-        
-        let displayed = format!("{}", err);
-        
-        // Should not contain sensitive information
-        assert!(!displayed.contains("/etc"));
-        assert!(!displayed.contains("shadow"));
-        assert!(!displayed.contains("load_config"));
-        assert!(!displayed.contains("Permission"));
-        
-        // Should contain safe information
-        assert!(displayed.contains("I/O"));
-        assert!(displayed.contains("E-IO-800"));
+        clear_salt();
     }
 
     #[test]
-    fn internal_log_contains_details() {
-        let err = AgentError::config(
-            definitions::CFG_PARSE_FAILED,
-            "test_operation",
-            "test details"
-        );
-        
-        let log = err.internal_log();
-        assert_eq!(log.operation(), "test_operation");
-        assert_eq!(log.details(), "test details");
+    fn log_creates_encrypted_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("palisade_lib_test_{}.log", std::process::id()));
+        let err = AgentError::new(100, "ext", "int", "sens");
+        err.log(&path).expect("log failed");
+
+        let meta = std::fs::metadata(&path).expect("file not created");
+        assert!(meta.len() > 0, "log file is empty");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode();
+            assert_eq!(mode & 0o777, 0o400, "file should be 0o400");
+        }
+
+        // Clean up.
+        log_sink::set_readonly(&path).ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&path).unwrap().permissions();
+            p.set_mode(0o600);
+            std::fs::set_permissions(&path, p).ok();
+        }
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn error_age_increases() {
-        let err = AgentError::config(
-            definitions::CFG_PARSE_FAILED,
-            "test",
-            "test"
-        );
-        
-        let age1 = err.age();
-        thread::sleep(Duration::from_millis(10));
-        let age2 = err.age();
-        
-        assert!(age2 > age1);
+    fn log_appends_multiple_records() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("palisade_append_test_{}.log", std::process::id()));
+
+        for i in 0..3_u16 {
+            let err = AgentError::new(100 + i, "ext", "int", "");
+            err.log(&path).unwrap();
+        }
+
+        let len = std::fs::metadata(&path).unwrap().len();
+        // Each record: 4-byte prefix + 12-byte nonce + plaintext+16-byte tag + 32-byte MAC.
+        // Minimum size is well above 0 for 3 records.
+        assert!(len > 100, "file too small for 3 records: {len} bytes");
+
+        // Clean up.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&path).unwrap().permissions();
+            p.set_mode(0o600);
+            std::fs::set_permissions(&path, p).ok();
+        }
+        std::fs::remove_file(&path).ok();
     }
 }

@@ -12,15 +12,7 @@ keywords = ["error", "security", "zeroize", "opsec", "forensics"]
 categories = ["development-tools::debugging", "cryptography"]
 
 [dependencies]
-async-std = { version = "1.13.2", optional = true }
-smallvec = "1.15.1"
-tokio = { version = "1.49.0", features = [
-    "time",
-    "rt",
-    "macros",
-    "rt-multi-thread",
-], optional = true }
-zeroize = { version = "1.7", features = ["derive"] }
+crypto_bastion = "0.3.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -36,9 +28,6 @@ default = []
 trusted_debug = []
 # Reserved for future external signaling capabilities
 external_signaling = []
-# Async timing normalization support
-tokio = ["dep:tokio"]
-async_std = ["dep:async-std"]
 strict_taxonomy = []
 strict_severity = []
 
@@ -47,37 +36,16 @@ strict_severity = []
 # ============================================================================
 
 
-[[example]]
-name = "basic_usage"
-path = "examples/basic_usage.rs"
-
-[[example]]
-name = "forensic_logging"
-path = "examples/forensic_logging.rs"
-
-[[example]]
-name = "honeypot_scenario"
-path = "examples/honeypot_scenario.rs"
-
-[[example]]
-name = "secure_macros"
-path = "examples/secure_macros.rs"
 
 # ============================================================================
 # BENCHMARKS
 # ============================================================================
 
-[[bench]]
-name = "error_performance"
-harness = false
 
 # ============================================================================
 # TESTS
 # ============================================================================
 
-[[test]]
-name = "proptest_suite"
-path = "tests/proptest_suite.rs"
 
 [package.metadata.docs.rs]
 all-features = true
