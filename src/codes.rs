@@ -18,7 +18,7 @@ use std::fmt;
 // ── ImpactScore ───────────────────────────────────────────────────────────────
 
 /// Validated impact score (0–1000).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ImpactScore(u16);
 
 impl ImpactScore {
@@ -29,18 +29,26 @@ impl ImpactScore {
         Self(score)
     }
 
+    #[cfg_attr(not(feature = "log"), allow(dead_code))]
     #[inline]
-    pub(crate) const fn value(self) -> u16 {
+    pub(crate) const fn value(&self) -> u16 {
         self.0
     }
 
     #[inline]
-    pub(crate) const fn to_impact_level(self) -> ErrorImpact {
+    pub(crate) const fn duplicate(&self) -> Self {
+        Self(self.0)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline]
+    pub(crate) const fn to_impact_level(&self) -> ErrorImpact {
         ErrorImpact::from_score(self.0)
     }
 
+    #[cfg_attr(not(feature = "strict_severity"), allow(dead_code))]
     #[inline]
-    pub(crate) const fn is_breach_level(self) -> bool {
+    pub(crate) const fn is_breach_level(&self) -> bool {
         self.0 >= 951
     }
 }
@@ -48,7 +56,8 @@ impl ImpactScore {
 // ── ErrorImpact ───────────────────────────────────────────────────────────────
 
 /// Severity classification derived from an `ImpactScore`.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ErrorImpact {
     Noise,
     Flaw,
@@ -62,6 +71,7 @@ pub(crate) enum ErrorImpact {
 }
 
 impl ErrorImpact {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn from_score(score: u16) -> Self {
         match score {
             0..=50 => Self::Noise,
@@ -105,6 +115,7 @@ impl ErrorNamespace {
     pub(crate) const fn as_str(&self) -> &'static str {
         self.name
     }
+    #[cfg_attr(not(feature = "strict_severity"), allow(dead_code))]
     #[inline]
     pub(crate) const fn can_breach(&self) -> bool {
         self.can_breach
@@ -129,32 +140,32 @@ pub(crate) mod namespaces {
 
 pub(crate) const fn permits_category(
     namespace: &ErrorNamespace,
-    category: OperationCategory,
+    category: &OperationCategory,
 ) -> bool {
     match namespace.name.as_bytes() {
         b"IO" => !matches!(
             category,
-            OperationCategory::Deception
-                | OperationCategory::Detection
-                | OperationCategory::Containment
+            &OperationCategory::Deception
+                | &OperationCategory::Detection
+                | &OperationCategory::Containment
         ),
         b"LOG" | b"TEL" => matches!(
             category,
-            OperationCategory::Audit | OperationCategory::Monitoring | OperationCategory::System
+            &OperationCategory::Audit | &OperationCategory::Monitoring | &OperationCategory::System
         ),
         b"DCP" => matches!(
             category,
-            OperationCategory::Deception
-                | OperationCategory::Detection
-                | OperationCategory::Containment
-                | OperationCategory::Deployment
+            &OperationCategory::Deception
+                | &OperationCategory::Detection
+                | &OperationCategory::Containment
+                | &OperationCategory::Deployment
         ),
         // All other namespaces are permissive.
         _ => true,
     }
 }
 
-pub(crate) const fn permits_impact(namespace: &ErrorNamespace, impact: ImpactScore) -> bool {
+pub(crate) const fn permits_impact(namespace: &ErrorNamespace, impact: &ImpactScore) -> bool {
     // In permissive mode all namespaces allow any impact.
     #[cfg(not(feature = "strict_severity"))]
     {
@@ -180,7 +191,7 @@ pub(crate) const fn permits_impact(namespace: &ErrorNamespace, impact: ImpactSco
 /// All instances are either `const` statics defined in `definitions.rs`, or
 /// obfuscated copies produced by `obfuscation::obfuscate_code`.
 ///
-/// `Sync` is satisfied because all fields are `Copy` or `&'static`.
+/// `Sync` is satisfied because all fields are plain data or `&'static`.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ErrorCode {
     pub(crate) namespace: &'static ErrorNamespace,
@@ -189,8 +200,8 @@ pub(crate) struct ErrorCode {
     pub(crate) impact: ImpactScore,
 }
 
-// SAFETY: All fields are either `&'static` references or `Copy` types;
-// no interior mutability is present.
+// SAFETY: All fields are plain value types or `&'static` references, and no
+// interior mutability is present.
 unsafe impl Send for ErrorCode {}
 unsafe impl Sync for ErrorCode {}
 
@@ -205,11 +216,11 @@ impl ErrorCode {
     ) -> Self {
         assert!(code > 0 && code < 1000, "ErrorCode must be 001-999");
         assert!(
-            permits_category(namespace, category),
+            permits_category(namespace, &category),
             "category not permitted for namespace"
         );
         assert!(
-            permits_impact(namespace, impact),
+            permits_impact(namespace, &impact),
             "impact not permitted for namespace"
         );
         Self {
@@ -221,8 +232,8 @@ impl ErrorCode {
     }
 
     #[inline]
-    pub(crate) const fn category(&self) -> OperationCategory {
-        self.category
+    pub(crate) const fn category(&self) -> &OperationCategory {
+        &self.category
     }
     #[inline]
     pub(crate) const fn namespace(&self) -> &'static ErrorNamespace {
@@ -233,9 +244,10 @@ impl ErrorCode {
         self.code
     }
     #[inline]
-    pub(crate) const fn impact(&self) -> ImpactScore {
-        self.impact
+    pub(crate) const fn impact(&self) -> &ImpactScore {
+        &self.impact
     }
+    #[cfg_attr(not(test), allow(dead_code))]
     #[inline]
     pub(crate) const fn impact_level(&self) -> ErrorImpact {
         self.impact.to_impact_level()
@@ -274,10 +286,10 @@ mod tests {
 
     #[test]
     fn category_enforcement_io() {
-        assert!(permits_category(&namespaces::IO, OperationCategory::IO));
+        assert!(permits_category(&namespaces::IO, &OperationCategory::IO));
         assert!(!permits_category(
             &namespaces::IO,
-            OperationCategory::Deception
+            &OperationCategory::Deception
         ));
     }
 

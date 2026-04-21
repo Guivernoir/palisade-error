@@ -1,90 +1,95 @@
-//! Bounded forensic ring buffer.
+//! Bounded forensic ring buffer with fully preallocated storage.
 //!
-//! Provides DoS-safe, bounded memory forensic logging.  The buffer is exposed
-//! to callers exclusively via [`crate::global_ring_buffer()`]; it cannot be
-//! constructed or written to from outside the crate.
-//!
-//! # Design
-//!
-//! - Fixed capacity set at construction; no growth, no reallocation.
-//! - FIFO eviction: oldest entry is silently dropped when capacity is reached.
-//! - Per-entry byte cap prevents one enormous error from dominating.
-//! - `Mutex`: exclusive access for simplicity under potential write-heavy loads.
-//! - `Arc<str>` for entries: `get_recent()` clones are atomic ref-count bumps.
+//! The hot `AgentError::new()` path writes into this buffer without heap
+//! allocation, and the internal read helpers iterate in place without
+//! snapshotting.
+
+#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::AgentError;
-use std::borrow::Cow;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use crate::fixed::FixedString;
+use crate::zeroization::{Zeroize, drop_zeroize};
+use std::fmt::Write as _;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// ── ForensicEntry ─────────────────────────────────────────────────────────────
+const ENTRY_CODE_BYTES: usize = 10;
+const ENTRY_EXTERNAL_BYTES: usize = 256;
+const ENTRY_INTERNAL_BYTES: usize = 256;
+const ENTRY_SOURCE_BYTES: usize = 64;
+const ENTRY_TRUNCATION_INDICATOR: &str = "...[TRUNC]";
 
 /// A single immutable forensic log entry with bounded field sizes.
-///
-/// All string fields use `Arc<str>` so that `clone()` is O(1) (atomic refcount
-/// increment, no heap allocation).
-#[derive(Debug, Clone)]
 pub(crate) struct ForensicEntry {
-    /// Unix timestamp (milliseconds) at which the error was logged.
     timestamp: u64,
-    /// Obfuscated error code string, e.g. `"E-CFG-103"`.
-    code: Arc<str>,
-    /// The external / deceptive payload supplied by the caller.
-    external: Arc<str>,
-    /// The internal diagnostic payload supplied by the caller.
-    internal: Arc<str>,
-    /// Source identifier; `"[internal]"` for auto-logged errors.
-    source_ip: Arc<str>,
-    /// Approximate total byte size of this entry.
+    code: FixedString<ENTRY_CODE_BYTES>,
+    external: FixedString<ENTRY_EXTERNAL_BYTES>,
+    internal: FixedString<ENTRY_INTERNAL_BYTES>,
+    source_ip: FixedString<ENTRY_SOURCE_BYTES>,
     size_bytes: usize,
-    /// Whether the error was marked as transient.
     retryable: bool,
 }
 
-// ── Internal ring buffer ──────────────────────────────────────────────────────
+impl ForensicEntry {
+    fn matches_source(&self, source: &str) -> bool {
+        self.source_ip.as_str() == source
+    }
+}
 
-struct RingBuffer {
-    entries: Box<[Option<ForensicEntry>]>,
+impl Zeroize for ForensicEntry {
+    fn zeroize(&mut self) {
+        self.timestamp.zeroize();
+        self.code.zeroize();
+        self.external.zeroize();
+        self.internal.zeroize();
+        self.source_ip.zeroize();
+        self.size_bytes.zeroize();
+        self.retryable.zeroize();
+    }
+}
+
+impl Drop for ForensicEntry {
+    fn drop(&mut self) {
+        drop_zeroize(self);
+    }
+}
+
+struct RingBuffer<const MAX_ENTRIES: usize> {
+    entries: [Option<ForensicEntry>; MAX_ENTRIES],
     tail: usize,
     head: usize,
     len: usize,
-    total_payload_bytes: AtomicUsize,
+    total_payload_bytes: usize,
 }
 
-impl RingBuffer {
-    fn new(capacity: usize) -> Self {
+impl<const MAX_ENTRIES: usize> RingBuffer<MAX_ENTRIES> {
+    const fn new() -> Self {
         Self {
-            entries: std::iter::repeat_with(|| None)
-                .take(capacity)
-                .collect::<Box<[Option<ForensicEntry>]>>(),
+            entries: [const { None }; MAX_ENTRIES],
             tail: 0,
             head: 0,
             len: 0,
-            total_payload_bytes: AtomicUsize::new(0),
+            total_payload_bytes: 0,
         }
     }
 
-    /// Push an entry; returns the evicted entry if the buffer was full.
     fn push(&mut self, entry: ForensicEntry) -> Option<ForensicEntry> {
-        let evicted = self.entries[self.tail].replace(entry);
-        self.tail = (self.tail + 1) % self.entries.len();
-        if self.len < self.entries.len() {
+        let index = self.tail;
+        let entry_size = entry.size_bytes;
+        let evicted = self.entries[index].replace(entry);
+        if let Some(ref old) = evicted {
+            self.total_payload_bytes = self.total_payload_bytes.saturating_sub(old.size_bytes);
+        }
+        self.total_payload_bytes = self.total_payload_bytes.saturating_add(entry_size);
+
+        self.tail = (self.tail + 1) % MAX_ENTRIES;
+        if self.len < MAX_ENTRIES {
             self.len += 1;
         } else {
-            self.head = (self.head + 1) % self.entries.len();
+            self.head = (self.head + 1) % MAX_ENTRIES;
         }
-        if let Some(ref ev) = evicted {
-            self.total_payload_bytes
-                .fetch_sub(ev.size_bytes, Ordering::Relaxed);
-        }
-        self.total_payload_bytes.fetch_add(
-            self.entries[self.tail.wrapping_sub(1) % self.entries.len()]
-                .as_ref()
-                .unwrap()
-                .size_bytes,
-            Ordering::Relaxed,
-        );
+
         evicted
     }
 
@@ -92,273 +97,176 @@ impl RingBuffer {
     fn len(&self) -> usize {
         self.len
     }
-    #[inline]
-    fn capacity(&self) -> usize {
-        self.entries.len()
-    }
 
     fn iter(&self) -> impl DoubleEndedIterator<Item = &ForensicEntry> {
         let head = self.head;
         let len = self.len;
-        let cap = self.entries.len();
-        (0..len).filter_map(move |i| {
-            let idx = (head + i) % cap;
-            self.entries[idx].as_ref()
-        })
-    }
-
-    fn clear(&mut self) {
-        for e in self.entries.iter_mut() {
-            *e = None;
-        }
-        self.head = 0;
-        self.tail = 0;
-        self.len = 0;
-        self.total_payload_bytes.store(0, Ordering::Relaxed);
+        (0..len).filter_map(move |i| self.entries[(head + i) % MAX_ENTRIES].as_ref())
     }
 }
 
-// ── RingBufferLogger ──────────────────────────────────────────────────────────
-
-/// Concurrent, bounded forensic log.
-///
-/// Obtain the global instance via [`crate::global_ring_buffer()`].
-/// This type is `pub(crate)` so callers can receive the reference, but its constructor
-/// is `pub(crate)` — external code cannot create additional instances.
-pub(crate) struct RingBufferLogger {
-    buffer: Arc<Mutex<RingBuffer>>,
-    max_entries: usize,
-    max_entry_bytes: usize,
-    eviction_count: Arc<AtomicU64>,
+/// Concurrent, bounded forensic log with static capacity.
+pub(crate) struct RingBufferLogger<const MAX_ENTRIES: usize, const MAX_ENTRY_BYTES: usize> {
+    buffer: Mutex<RingBuffer<MAX_ENTRIES>>,
+    eviction_count: AtomicU64,
 }
 
-impl RingBufferLogger {
+impl<const MAX_ENTRIES: usize, const MAX_ENTRY_BYTES: usize>
+    RingBufferLogger<MAX_ENTRIES, MAX_ENTRY_BYTES>
+{
     /// Create a new ring buffer logger.
-    ///
-    /// `pub(crate)` — callers use [`crate::global_ring_buffer()`].
-    pub(crate) fn new_internal(max_entries: usize, max_entry_bytes: usize) -> Self {
-        let bounded = max_entries.max(1);
+    pub(crate) const fn new_internal() -> Self {
+        assert!(MAX_ENTRIES > 0, "ring buffer capacity must be non-zero");
+        assert!(
+            MAX_ENTRY_BYTES > 0,
+            "ring buffer entry size must be non-zero"
+        );
         Self {
-            buffer: Arc::new(Mutex::new(RingBuffer::new(bounded))),
-            max_entries: bounded,
-            max_entry_bytes,
-            eviction_count: Arc::new(AtomicU64::new(0)),
+            buffer: Mutex::new(RingBuffer::new()),
+            eviction_count: AtomicU64::new(0),
         }
     }
-
-    // ── Lock helpers ─────────────────────────────────────────────────────────
 
     #[inline]
-    fn lock_buffer(&self) -> MutexGuard<'_, RingBuffer> {
+    fn lock_buffer(&self) -> MutexGuard<'_, RingBuffer<MAX_ENTRIES>> {
         match self.buffer.lock() {
-            Ok(g) => g,
+            Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 
-    // ── Internal write path ───────────────────────────────────────────────────
-
-    /// Log an error with a sentinel source identifier `"[internal]"`.
-    ///
-    /// Called automatically from `AgentError::new()` — not callable externally.
+    /// Log an error with the sentinel source identifier `"[internal]"`.
     pub(crate) fn log_internal(&self, err: &AgentError) {
         self.log_with_source(err, "[internal]");
     }
 
-    /// Log an error with an explicit source identifier (e.g. a peer IP address).
-    ///
-    /// Callers that have access to request context should call this after the
-    /// automatic `"[internal]"` entry to add source attribution.
-    ///
-    /// `pub(crate)` — access via the global handle and `log_with_source` on the
-    /// returned reference is the intended pattern.
+    /// Log an error with an explicit source identifier.
     pub(crate) fn log_with_source(&self, err: &AgentError, source: &str) {
         let entry = self.make_entry(err, source);
-        let mut buf = self.lock_buffer();
-        if buf.push(entry).is_some() {
+        let mut buffer = self.lock_buffer();
+        if buffer.push(entry).is_some() {
             self.eviction_count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    // ── Entry construction ────────────────────────────────────────────────────
-
     fn make_entry(&self, err: &AgentError, source_ip: &str) -> ForensicEntry {
-        let mut remaining = self.max_entry_bytes;
-        let mut size = 0usize;
+        let mut remaining = MAX_ENTRY_BYTES;
 
-        let code_str = err.code_inner().to_string();
-        let ext = err.external_payload();
-        let int = err.internal_payload();
+        let mut code = FixedString::<ENTRY_CODE_BYTES>::new();
+        write!(&mut code, "{}", err.code_inner()).expect("error code exceeds fixed width");
+        let mut size = code.len();
+        remaining = remaining.saturating_sub(code.len());
 
-        // External field: cap at 512 bytes.
-        let ext_cap = remaining.min(512);
-        let ext_s = truncate_to_bytes(ext, ext_cap);
-        size += ext_s.len();
-        remaining = remaining.saturating_sub(ext_s.len());
+        let mut external = FixedString::<ENTRY_EXTERNAL_BYTES>::new();
+        external.set_truncated_to(
+            err.external_payload(),
+            remaining.min(ENTRY_EXTERNAL_BYTES),
+            ENTRY_TRUNCATION_INDICATOR,
+        );
+        size += external.len();
+        remaining = remaining.saturating_sub(external.len());
 
-        // Internal field: cap at 512 bytes.
-        let int_cap = remaining.min(512);
-        let int_s = truncate_to_bytes(int, int_cap);
-        size += int_s.len();
-        remaining = remaining.saturating_sub(int_s.len());
+        let mut internal = FixedString::<ENTRY_INTERNAL_BYTES>::new();
+        internal.set_truncated_to(
+            err.internal_payload(),
+            remaining.min(ENTRY_INTERNAL_BYTES),
+            ENTRY_TRUNCATION_INDICATOR,
+        );
+        size += internal.len();
+        remaining = remaining.saturating_sub(internal.len());
 
-        // Source: cap at 128 bytes.
-        let src_cap = remaining.min(128);
-        let src_s = if src_cap == 0 {
-            Cow::Borrowed("[TRUNCATED]")
-        } else {
-            let s = truncate_to_bytes(source_ip, src_cap);
-            size += s.len();
-            s
-        };
+        let mut source = FixedString::<ENTRY_SOURCE_BYTES>::new();
+        source.set_truncated_to(
+            source_ip,
+            remaining.min(ENTRY_SOURCE_BYTES),
+            ENTRY_TRUNCATION_INDICATOR,
+        );
+        size += source.len();
 
         ForensicEntry {
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64),
-            code: Arc::from(code_str.as_str()),
-            external: Arc::from(ext_s.as_ref()),
-            internal: Arc::from(int_s.as_ref()),
-            source_ip: Arc::from(src_s.as_ref()),
+                .map_or(0, |duration| duration.as_millis() as u64),
+            code,
+            external,
+            internal,
+            source_ip: source,
             size_bytes: size,
             retryable: err.is_retryable(),
         }
     }
 
-    // ── Public read API ───────────────────────────────────────────────────────
-
-    /// Execute a closure with the `count` most-recent entries in reverse chronological order.
-    pub(crate) fn with_recent<F, R>(&self, count: usize, f: F) -> R
+    /// Visit the `count` most recent entries in reverse chronological order.
+    pub(crate) fn for_each_recent<F>(&self, count: usize, mut f: F)
     where
-        F: FnOnce(&[ForensicEntry]) -> R,
+        F: FnMut(&ForensicEntry),
     {
         let guard = self.lock_buffer();
-        let entries: Vec<ForensicEntry> = guard.iter().rev().take(count).cloned().collect();
-        drop(guard);
-        f(&entries)
+        for entry in guard.iter().rev().take(count) {
+            f(entry);
+        }
     }
 
-    /// Execute a closure with all entries in reverse chronological order.
-    pub(crate) fn with_all<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&[ForensicEntry]) -> R,
-    {
-        let guard = self.lock_buffer();
-        let entries: Vec<ForensicEntry> = guard.iter().rev().cloned().collect();
-        drop(guard);
-        f(&entries)
-    }
-
-    /// Execute a closure with entries matching a predicate (e.g., filter by source IP).
-    pub(crate) fn with_filtered<F, P, R>(&self, predicate: P, f: F) -> R
+    /// Visit entries matching a predicate in reverse chronological order.
+    pub(crate) fn for_each_filtered<P, F>(&self, predicate: P, mut f: F)
     where
         P: Fn(&ForensicEntry) -> bool,
-        F: FnOnce(&[ForensicEntry]) -> R,
+        F: FnMut(&ForensicEntry),
     {
         let guard = self.lock_buffer();
-        let entries: Vec<ForensicEntry> = guard.iter().filter(|e| predicate(e)).cloned().collect();
-        drop(guard);
-        f(&entries)
+        for entry in guard.iter().rev() {
+            if predicate(entry) {
+                f(entry);
+            }
+        }
     }
 
-    /// Current number of entries in the buffer.
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.lock_buffer().len()
     }
 
-    /// `true` if the buffer contains no entries.
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Total evictions since creation.  A high and rising value indicates
-    /// sustained high-volume attack traffic.
     #[inline]
     pub(crate) fn eviction_count(&self) -> u64 {
         self.eviction_count.load(Ordering::Relaxed)
     }
 
-    /// Buffer capacity set at initialisation.
-    #[inline]
-    pub(crate) fn capacity(&self) -> usize {
-        self.max_entries
-    }
-
-    /// `true` if the buffer has reached capacity (next write will evict).
-    pub(crate) fn is_full(&self) -> bool {
-        self.len() >= self.max_entries
-    }
-
-    /// Approximate total payload bytes stored (lower-bound estimate).
     pub(crate) fn payload_bytes(&self) -> usize {
-        self.lock_buffer()
-            .total_payload_bytes
-            .load(Ordering::Relaxed)
-    }
-
-    /// Clear all entries.
-    pub(crate) fn clear(&self) {
-        self.lock_buffer().clear();
+        self.lock_buffer().total_payload_bytes
     }
 }
-
-// ── Truncation helper ─────────────────────────────────────────────────────────
-
-/// Truncate `s` to at most `max_bytes` bytes at a valid UTF-8 boundary.
-/// Returns `Cow::Borrowed` when no truncation is needed (zero allocation).
-fn truncate_to_bytes<'a>(s: &'a str, max_bytes: usize) -> Cow<'a, str> {
-    const INDICATOR: &str = "...[TRUNC]";
-    if max_bytes == 0 {
-        return Cow::Borrowed("");
-    }
-    if s.len() <= max_bytes {
-        return Cow::Borrowed(s);
-    }
-
-    if max_bytes <= INDICATOR.len() {
-        return Cow::Borrowed(&INDICATOR[..max_bytes.min(INDICATOR.len())]);
-    }
-    let max_content = max_bytes - INDICATOR.len();
-    let mut idx = max_content;
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    if idx == 0 {
-        return Cow::Borrowed(INDICATOR);
-    }
-
-    let mut out = String::with_capacity(idx + INDICATOR.len());
-    out.push_str(&s[..idx]);
-    out.push_str(INDICATOR);
-    Cow::Owned(out)
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::AgentError;
 
-    fn make_logger() -> RingBufferLogger {
-        RingBufferLogger::new_internal(100, 1_024)
+    type TestLogger = RingBufferLogger<100, 1_024>;
+
+    fn make_logger() -> TestLogger {
+        TestLogger::new_internal()
     }
 
     fn make_err(external: &'static str, internal: &'static str) -> AgentError {
-        // Use new() so obfuscation/CT/auto-log all run; we discard the
-        // auto-logged entry in the global buffer and re-log to our local one.
         AgentError::new(100, external, internal, "")
     }
 
     #[test]
     fn evicts_oldest_when_full() {
-        let logger = RingBufferLogger::new_internal(3, 1_024);
+        let logger = RingBufferLogger::<3, 1_024>::new_internal();
         for i in 0..5_u32 {
-            // We log directly to our local logger — the global buffer also gets
-            // an entry from new(), which is expected and inconsequential here.
-            logger.log_with_source(&make_err("e", "i"), &format!("src-{}", i));
+            let source = if i == 0 {
+                "src-0"
+            } else if i == 1 {
+                "src-1"
+            } else if i == 2 {
+                "src-2"
+            } else if i == 3 {
+                "src-3"
+            } else {
+                "src-4"
+            };
+            logger.log_with_source(&make_err("e", "i"), source);
         }
         assert_eq!(logger.len(), 3);
         assert_eq!(logger.eviction_count(), 2);
@@ -366,48 +274,50 @@ mod tests {
 
     #[test]
     fn filtering_works() {
-        let logger = RingBufferLogger::new_internal(20, 1_024);
+        let logger = RingBufferLogger::<20, 1_024>::new_internal();
         for i in 0..6_u32 {
             let ip = if i % 2 == 0 { "1.1.1.1" } else { "2.2.2.2" };
             logger.log_with_source(&make_err("e", "i"), ip);
         }
-        logger.with_filtered(
-            |e| e.source_ip.as_ref() == "1.1.1.1",
-            |from_1| {
-                assert_eq!(from_1.len(), 3);
+        let mut from_1 = 0;
+        logger.for_each_filtered(
+            |entry| entry.matches_source("1.1.1.1"),
+            |_| {
+                from_1 += 1;
             },
         );
+        assert_eq!(from_1, 3);
     }
 
     #[test]
-    fn truncate_respects_utf8() {
-        let emoji = "🔥".repeat(100);
-        let result = truncate_to_bytes(&emoji, 50);
-        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
-        assert!(result.len() <= 50);
-    }
-
-    #[test]
-    fn truncate_no_alloc_when_short() {
-        let result = truncate_to_bytes("short", 100);
-        assert!(matches!(result, Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn arc_ptrs_are_shared_across_clones() {
+    fn recent_reads_are_stable() {
         let logger = make_logger();
         logger.log_internal(&make_err("e", "i"));
-        logger.with_recent(1, |e1| {
-            logger.with_recent(1, |e2| {
-                assert!(Arc::ptr_eq(&e1[0].code, &e2[0].code));
-                assert!(Arc::ptr_eq(&e1[0].external, &e2[0].external));
-            });
+        let mut first_code = FixedString::<ENTRY_CODE_BYTES>::new();
+        let mut first_external = FixedString::<ENTRY_EXTERNAL_BYTES>::new();
+
+        logger.for_each_recent(1, |entry| {
+            first_code.set_truncated_to(
+                entry.code.as_str(),
+                ENTRY_CODE_BYTES,
+                ENTRY_TRUNCATION_INDICATOR,
+            );
+            first_external.set_truncated_to(
+                entry.external.as_str(),
+                ENTRY_EXTERNAL_BYTES,
+                ENTRY_TRUNCATION_INDICATOR,
+            );
+        });
+
+        logger.for_each_recent(1, |entry| {
+            assert_eq!(entry.code.as_str(), first_code.as_str());
+            assert_eq!(entry.external.as_str(), first_external.as_str());
         });
     }
 
     #[test]
     fn payload_bytes_updates_correctly() {
-        let logger = RingBufferLogger::new_internal(3, 1_024);
+        let logger = RingBufferLogger::<3, 1_024>::new_internal();
         logger.log_internal(&make_err("external", "internal"));
         let bytes_after_first = logger.payload_bytes();
         assert!(bytes_after_first > 0);
@@ -415,7 +325,6 @@ mod tests {
         logger.log_internal(&make_err("ext2", "int2"));
         assert!(logger.payload_bytes() > bytes_after_first);
 
-        // Fill and evict
         logger.log_internal(&make_err("ext3", "int3"));
         logger.log_internal(&make_err("ext4", "int4"));
         assert_eq!(logger.eviction_count(), 1);
@@ -426,14 +335,13 @@ mod tests {
     fn timestamp_is_millis() {
         let logger = make_logger();
         logger.log_internal(&make_err("e", "i"));
-        logger.with_recent(1, |recent| {
-            let entry = &recent[0];
+        logger.for_each_recent(1, |entry| {
             let now_millis = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
             assert!(entry.timestamp <= now_millis);
-            assert!(entry.timestamp > now_millis - 1000); // Within last second
+            assert!(entry.timestamp > now_millis - 1_000);
         });
     }
 }

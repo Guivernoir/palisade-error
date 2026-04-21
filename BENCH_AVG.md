@@ -1,60 +1,79 @@
-# Palisade Error Component: Benchmark Analysis
+# Performance and Allocation Notes
 
-## 1. Executive Summary
+## Abstract
 
-This document provides a detailed performance breakdown of the high-fidelity error component (benchmark run timestamp: `1771334046`). The results confirm a **production-grade architecture** characterized by **Timing Normalization** (to prevent side-channel leakage) and a **strict zero-leak memory management policy**. Tested on legacy hardware (Dell Latitude E6410), the component maintains sub-microsecond internal speeds and consistent microsecond-scale public-facing response times — with one notable update: **Ring Buffer structures now carry a small, bounded, and intentional net allocation footprint**, which is the expected behavior for a persistent eviction-based log.
+This repository does not keep fixed benchmark numbers under version control. Performance and allocation measurements are machine-dependent and sensitive to operating system, CPU model, clock behavior, compiler version, enabled features, and benchmark harness configuration.
 
-## 2. Testing Environment
+Accordingly, the supported benchmark practice is to generate fresh local reports and interpret them against design expectations rather than against stale committed numbers.
 
-* **Language:** Rust (Stable)
-* **Hardware:** Dell Latitude E6410
-* **Memory:** 6 GB RAM
-* **Target Accuracy:** High-fidelity attack simulation
-* **Sample Size:** ~110–125 iterations per benchmark scenario
+## Evaluation Scope
 
-## 3. Security Architecture: Timing Normalization
+The benchmark suite is intended to answer three practical questions:
 
-The core security feature remains **Timing Normalization**. The component enforces a 1 µs execution window to prevent observable jitter that could reveal the honeypot's nature.
+- does the public path remain allocation-free
+- do timing floors remain observable in the intended scenarios
+- does enabling optional logging preserve bounded behavior
 
-* **Public Latency Consistency:** Standard operations such as `Simple Error Creation` (avg **1.18 µs**), `Dynamic String Error` (avg **1.25 µs**), and `Error with Sensitive Data` (avg **1.18 µs**) all converge tightly within the **1.18 µs – 1.28 µs** normalized band. The steady-state floor after warm-up is a rock-solid **1.12 µs**.
-* **Intentional Delay Simulations:** `Fast Error With Norm` locks at an average of **10.09 ms** (range: 10.07–10.15 ms), and `Slow Error With Norm` at an average of **15.15 ms** (range: 15.07–17.03 ms, with rare OS-induced outliers reaching 17 ms). Both remain well within acceptable tolerance bands.
-* **Control Overhead:** The `Timing Norm Measurement Overhead` remains exceptionally stable at an average of **~1.18 µs**, confirming the defense mechanism introduces no detectable signature of its own.
+## Reproducible Commands
 
-## 4. Memory Efficiency & Reliability
+```bash
+cargo bench --bench performance
+cargo bench --bench memory
 
-A primary goal for a long-running honeypot is stability. The component sustains a near-universal **"Zero-Leak"** state.
+# Optional logging-path coverage
+cargo bench --bench performance --features log
+cargo bench --bench memory --features log
+```
 
-* **Steady State Memory Balance:** For all standard error creation, formatting, obfuscation, and burst scenarios, the `Net` memory impact is **0 B** — Rust's ownership model cleanly deallocates every byte.
-* **Metadata Scalability:** Metadata access remains in the nanosecond tier (avg **26 ns** for 0 fields, **27 ns** for 1 or 4 fields, **25 ns** for 8 fields). The allocation footprint for adding metadata scales predictably: 7 B for 1 field, 14 B for 2, 28 B for 4, and 376 B for 8 fields — all with zero net residual.
-* **String Handling:** Even under `Allocation Heavy Dynamic Strings` scenarios (avg **1.34 µs**, 46 B allocated), the system remains leak-free and normalized.
-* **Ring Buffer Behavior (Expected):** Ring buffer structures carry a small, bounded net allocation as designed. At 100 entries the average net is ~9 B; at 1,000 entries ~13 B; at 10,000 entries ~16 B. `Ring Buffer With Eviction` (avg **371.81 µs**) carries a net of ~241 B — the intentional residue of the eviction-managed log state. This is not a leak; it is the buffer doing its job.
+## Report Location
 
-## 5. Performance Under Attack Load
+Generated reports are written to:
 
-The component is designed to handle automated scanners and aggressive probing without degradation.
+- `target/bench-results/performance.txt`
+- `target/bench-results/memory.txt`
 
-| Scenario | Avg Execution Time | Range | Total Allocations |
-| --- | --- | --- | --- |
-| **Attack Burst (10)** | 20.3 µs | 16.9 – 34.6 µs | Net: 0 B |
-| **Attack Burst (50)** | ~101 µs | 84 – 221 µs | Net: 0 B |
-| **Attack Burst (100)** | 213 µs | 171 – 473 µs | Net: 0 B |
-| **Attack Burst (500)** | 1.22 ms | 1.00 – 1.38 ms | Net: 0 B |
-| **Batch Create (1000)** | 1.13 ms | 1.08 – 2.15 ms | Net: 0 B |
-| **Batch Log (1000)** | ~680 µs | 510 µs – 1.1 ms | Net: 0 B |
+## Report Contents
 
-* **Honeypot Scenario Fidelity:** Specific deceptive scenarios perform as expected — `Honeypot Auth Failure` averages **2.69 µs** (320 B allocated), `Honeypot Path Traversal` averages **2.38 µs** (310 B), and `Honeypot Rate Limit` averages **1.71 µs** (54 B). All return to zero net, confirming clean teardown after each simulated response.
-* **Multi-threading Resilience:** Under concurrent load, the system scales gracefully: 2 threads average **1.72 ms** (1.01–3.46 ms), 4 threads average **2.11 ms** (1.05–5.59 ms), and 8 threads average **3.49 ms** (2.18–7.28 ms). No thread starvation, no runaway allocations.
+Each report records, per scenario:
 
-## 6. Micro-benchmarks
+- iteration count
+- average latency
+- minimum latency
+- maximum latency
+- allocations per iteration
+- deallocations per iteration
+- reallocations per iteration
+- bytes allocated per iteration
+- bytes deallocated per iteration
+- bytes reallocated per iteration
+- configured timing floor in nanoseconds
+- timing-floor check result as `true` or `false`
 
-Internal utility functions operate well under the 1 µs normalization window, leaving ample headroom for defensive operations.
+## Expected Invariants
 
-* **Obfuscation Logic:** `Obfuscate Code` averages **~33 ns** (min 25 ns, max 129 ns). A slight uptick from the prior run, attributable to increased obfuscation complexity.
-* **Cryptographic Randomness:** `Generate Random Salt` averages **~75 ns** — a meaningful improvement over the previous ~92 ns figure. Salt quality remains uncompromised.
-* **Session Initialization:** `Init Session Salt` runs at an average of **~28 ns**, representing nearly free-of-charge session bootstrapping.
-* **Logging Consistency:** `Internal Log Write` averages **~686 ns** (range: 533–998 ns), comfortably within the 1 µs safety window. `Log with Sensitive Data` averages **~563 ns**.
-* **String Truncation:** Truncation operations scale cleanly with input size — 100-char truncation at **~689 ns**, 1,024 chars at **~862 ns**, 5,000 chars at **~910 ns**, and 10,000 chars at **~859 ns**. All well under 1 µs.
+The design intent of the current crate implies the following expectations:
 
-## 7. Conclusion
+- ordinary `AgentError` construction and formatting should report zero heap allocations per iteration
+- timing-oriented scenarios should respect the configured public floor
+- the `log` scenario should remain bounded in memory use even when encrypted persistence is enabled
 
-The updated benchmarks confirm this error component remains **highly efficient and cryptographically sound** with respect to timing side-channels. The normalization mechanism is tighter than ever, microsecond-level predictability is maintained on aging hardware, and zero-net memory growth holds across all standard scenarios. The only net-positive allocations are the Ring Buffers, which are operating precisely as intended. The system is production-ready for high-fidelity honeypot deployment.
+If a benchmark run violates one of these expectations, the result should be treated as a regression candidate, not as background noise.
+
+## Interpretation Guidance
+
+Benchmark numbers should be compared only within a clearly defined context:
+
+- same machine class
+- same Rust toolchain
+- same feature set
+- same benchmark harness inputs
+
+Cross-machine numbers can still be useful for rough capacity planning, but they are not a strong basis for release claims.
+
+## Recommended Release Practice
+
+For production-facing releases, benchmark reports should be regenerated on hardware that resembles the intended deployment class. At minimum, maintainers should verify:
+
+- no unexpected allocations appear on the public path
+- timing floors are still met under the tested workload
+- enabling `log` does not introduce unbounded behavior

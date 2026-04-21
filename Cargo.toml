@@ -1,6 +1,6 @@
 [package]
 name = "palisade-errors"
-version = "1.0.1"
+version = "2.0.0"
 edition = "2024"
 authors = ["Guilherme F. G. Santos <strukturaenterprise@gmail.com>"]
 description = "Security-conscious error handling with operational security principles"
@@ -12,29 +12,25 @@ keywords = ["error", "security", "zeroize", "opsec", "forensics"]
 categories = ["development-tools::debugging", "cryptography"]
 
 [dependencies]
-crypto_bastion = "0.3.0"
+crypto_bastion = "0.4.0"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-chrono = "0.4.42"
-md5 = "0.8.0"
-serde_json = "1.0.149"
 proptest = "1.5"
 stats_alloc = "0.1.10"
 
 [features]
 default = []
-# Enable detailed debug formatting for trusted environments only
+log = []
 trusted_debug = []
-# Reserved for future external signaling capabilities
-external_signaling = []
-strict_taxonomy = []
 strict_severity = []
 
 # ============================================================================
 # EXAMPLES
 # ============================================================================
 
+[[example]]
+name = "encrypted_logging"
+required-features = ["log"]
 
 
 # ============================================================================
@@ -60,3 +56,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 opt-level = 3
 lto = true
 codegen-units = 1
+
+[[bench]]
+name = "performance"
+harness = false
+
+[[bench]]
+name = "memory"
+harness = false

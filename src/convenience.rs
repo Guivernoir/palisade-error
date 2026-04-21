@@ -5,50 +5,81 @@
 //!
 //! # Sanitization
 //!
-//! `sanitize_string` and `MAX_SANITIZED_LEN` remain available for any internal
-//! code that needs to bound dynamic strings before embedding them in payloads.
+//! `sanitize_into` is the production sanitization path.
+//! `sanitize_string` is a test-only wrapper used by assertions.
+
+#[cfg(any(feature = "log", test))]
+use crate::fixed::FixedString;
+#[cfg(any(feature = "log", test))]
+use std::fmt::Write as _;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Maximum byte length for a sanitized string embedded in error payloads.
+#[cfg(any(feature = "log", test))]
 pub(crate) const MAX_SANITIZED_LEN: usize = 256;
+#[cfg(any(feature = "log", test))]
+const TRUNCATION_INDICATOR: &str = "...[TRUNCATED]";
 
 // ── Sanitization ──────────────────────────────────────────────────────────────
 
-/// Sanitize a string for safe embedding in error payloads.
+/// Test-only sanitization wrapper that materializes the result as a `String`.
 ///
 /// - Truncates to `MAX_SANITIZED_LEN` characters at a valid UTF-8 boundary.
-/// - Replaces ASCII control characters (0x00–0x1F and 0x7F) with `'?'` to
-///   prevent log injection or terminal escape-sequence attacks.
+/// - Replaces control characters, including line and field separators, with
+///   `'?'` to prevent log injection or terminal escape-sequence attacks.
 /// - Appends `"...[TRUNCATED]"` when truncation occurs so operators know.
-/// - Returns a `String`; allocation is acceptable on error paths.
+/// - Returns a `String`; allocation is confined to tests.
+#[cfg(test)]
 pub(crate) fn sanitize_string(input: &str) -> String {
-    // Replace control characters first (operates on characters, not bytes).
-    let sanitized: String = input
-        .chars()
-        .map(|c| {
-            if c.is_control() && c != '\n' && c != '\t' {
-                '?'
-            } else {
-                c
-            }
-        })
-        .collect();
+    let mut out = FixedString::<MAX_SANITIZED_LEN>::new();
+    sanitize_into(&mut out, input, MAX_SANITIZED_LEN);
+    out.as_str().to_owned()
+}
 
-    // Truncate at MAX_SANITIZED_LEN character boundary.
-    if sanitized.chars().count() <= MAX_SANITIZED_LEN {
-        return sanitized;
+/// Sanitize `input` into an inline fixed-capacity output buffer.
+#[cfg(any(feature = "log", test))]
+pub(crate) fn sanitize_into<const N: usize>(
+    out: &mut FixedString<N>,
+    input: &str,
+    max_bytes: usize,
+) {
+    let capacity = N.min(max_bytes);
+    out.clear();
+    if capacity == 0 {
+        return;
     }
 
-    let mut result = String::with_capacity(MAX_SANITIZED_LEN + 14);
-    for (i, c) in sanitized.char_indices() {
-        if i >= MAX_SANITIZED_LEN {
+    let mut chars = input.chars().peekable();
+    let mut truncated = false;
+    while let Some(ch) = chars.next() {
+        let safe = if ch.is_control() { '?' } else { ch };
+
+        if out.len() + safe.len_utf8() > capacity {
+            truncated = true;
             break;
         }
-        result.push(c);
+
+        out.write_char(safe)
+            .expect("fixed string capacity pre-checked");
+        if chars.peek().is_some() && out.len() == capacity {
+            truncated = true;
+            break;
+        }
     }
-    result.push_str("...[TRUNCATED]");
-    result
+
+    if truncated {
+        let indicator_len = TRUNCATION_INDICATOR.len().min(capacity);
+        while out.len() + indicator_len > capacity {
+            let mut new_len = out.len().saturating_sub(1);
+            while new_len > 0 && !out.as_str().is_char_boundary(new_len) {
+                new_len -= 1;
+            }
+            out.truncate(new_len);
+        }
+        out.write_str(&TRUNCATION_INDICATOR[..indicator_len])
+            .expect("indicator must fit sanitized output");
+    }
 }
 
 // ── Error-code definition macros (crate-internal only) ───────────────────────
@@ -112,9 +143,12 @@ mod tests {
 
     #[test]
     fn sanitize_replaces_control_chars() {
-        let input = "hello\x01world\x7f";
+        let input = "hello\x01wor\tld\n\r\x7f";
         let result = sanitize_string(input);
         assert!(!result.contains('\x01'));
+        assert!(!result.contains('\t'));
+        assert!(!result.contains('\n'));
+        assert!(!result.contains('\r'));
         assert!(!result.contains('\x7f'));
         assert!(result.contains('?'));
     }

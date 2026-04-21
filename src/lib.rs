@@ -2,18 +2,20 @@
 //!
 //! Security-conscious error handling for hostile-environment deployments.
 //!
-//! ## Public surface (total)
+//! ## Public surface
+//!
+//! The crate exports exactly one named public type: [`AgentError`].
+//!
+//! Its inherent methods are the supported entry points:
 //!
 //! ```text
 //! AgentError::new(code, external, internal, sensitive) -> AgentError
-//! AgentError::log(&self, path: &Path) -> io::Result<()>
-//! Result<T>   (type alias)
+//! AgentError::with_timing_normalization(self, minimum) -> AgentError
+//! AgentError::with_timing_normalization_async(self, minimum) -> AgentError
+//! AgentError::log(&self, path) -> io::Result<()>    // feature = "log"
 //! ```
 //!
-//! Everything else — codes, ring buffer, session salt, internal log, SOC
-//! access tokens — is `pub(crate)` or private.  External crates can only
-//! construct errors through `new()` and optionally persist them through
-//! `log()`.
+//! Everything else is crate-private implementation detail.
 //!
 //! ## Automatic security behaviours (zero opt-out)
 //!
@@ -21,27 +23,33 @@
 //!
 //! - **Code obfuscation** — numeric code is offset by a per-session random
 //!   salt so attackers cannot build a stable fingerprint map across sessions.
-//! - **Constant-time floor** — a 1 µs spin-loop prevents timing-based
-//!   discrimination between fast and slow error paths.
-//! - **Ring-buffer logging** — the error is appended to an in-process
-//!   forensic buffer (capacity 4 096 × 2 KiB ≈ 8 MiB) for DoS-bounded
-//!   forensic retention.
-//! - **Redacted Display** — `Display` only emits the obfuscated code and
-//!   its deceptive category label; no payload content ever appears.
-//! - **Zeroize on Drop** — every `Cow::Owned` payload is overwritten before
-//!   the allocator reclaims the memory.
+//! - **Constant-time floor** — a 50 µs minimum public-path duration reduces
+//!   timing discrimination across error surfaces.
+//! - **Ring-buffer logging** — the error is appended to a fully preallocated
+//!   in-process forensic buffer for DoS-bounded retention.
+//! - **Terminal Display** — `Display` emits only the external payload so the
+//!   terminal surface stays minimal and the internal payloads remain log-only.
+//! - **Trusted Debug** — `Debug` exposes the full payload set only when
+//!   `feature = "trusted_debug"` is enabled.
+//! - **Zeroize on Drop** — inline payload buffers are scrubbed before reuse or
+//!   drop.
 //!
 //! ## Log encryption (`AgentError::log`)
 //!
-//! Calling `.log(path)` appends one AES-256-GCM-encrypted record to `path`
+//! Calling `.log(path)` appends one layered encrypted record to `path`
 //! and immediately sets the file to read-only (`0o400` on Unix).
+//! This API is available only when the `log` feature is enabled.
 //!
 //! - The session key is generated once from the OS CSPRNG and held in
 //!   process memory only — it is never written to disk.
-//! - Each record includes an HMAC-SHA512 tag for tamper detection.
-//! - Reading the log file requires the session key, which demands either
-//!   live process-memory access (root / ptrace) or a separately secured
-//!   key-escrow mechanism.
+//! - Each record uses inner AES-256-GCM, an outer SHA-512-derived masking
+//!   layer, and an HMAC-SHA512 tag over the final frame.
+//! - Record construction, layered encryption, and MAC generation use
+//!   fixed-capacity buffers and avoid heap allocation.
+//! - This improves defense-in-depth and quantum search margin, but it is not a
+//!   substitute for a standardized post-quantum cryptosystem.
+//! - Reading the log file still requires the session key, which demands either
+//!   live process-memory access or a separately secured key-escrow mechanism.
 //!
 //! ## Error code ranges
 //!
@@ -61,12 +69,13 @@
 #![deny(clippy::all)]
 #![deny(clippy::clone_on_ref_ptr)]
 
-use std::borrow::Cow;
-use std::error::Error;
+use fixed::{FixedString, TRUNCATION_INDICATOR};
 use std::fmt;
+#[cfg(feature = "log")]
 use std::io;
+#[cfg(feature = "log")]
 use std::path::Path;
-use std::result;
+#[cfg(feature = "log")]
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use zeroization::Zeroize;
@@ -74,32 +83,29 @@ use zeroization::Zeroize;
 // ── Internal modules ──────────────────────────────────────────────────────────
 
 mod codes;
-mod context;
 mod convenience;
 mod crypto;
 mod ct;
 mod definitions;
+mod fixed;
+#[cfg(feature = "log")]
 mod log_sink;
-mod logging;
 mod models;
 mod obfuscation;
 mod ring_buffer;
 mod zeroization;
-
-// ── Public surface ────────────────────────────────────────────────────────────
-
-/// Type alias for `std::result::Result` specialised on [`AgentError`].
-pub type Result<T> = result::Result<T, AgentError>;
 
 // ── Session key (process-lifetime, never written to disk) ─────────────────────
 
 /// AES-256 session key held exclusively in process memory.
 ///
 /// Seeded once from the OS CSPRNG on first log write.  Never exported, never
-/// written to disk.  Requires root/ptrace to extract from a running process.
+/// written to disk. Extracting it still requires live process-memory access.
+#[cfg(feature = "log")]
 static SESSION_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 
 #[cold]
+#[cfg(feature = "log")]
 fn init_session_key() -> [u8; 32] {
     let mut key = [0u8; 32];
     crypto::fill_random_array(&mut key).expect("OS RNG unavailable; cannot initialise session key");
@@ -107,17 +113,25 @@ fn init_session_key() -> [u8; 32] {
 }
 
 #[inline]
+#[cfg(feature = "log")]
 fn session_key() -> &'static [u8; 32] {
     SESSION_KEY.get_or_init(init_session_key)
 }
 
 // ── Global ring buffer (DoS-bounded in-process forensic log) ──────────────────
 
-static GLOBAL_RING: OnceLock<ring_buffer::RingBufferLogger> = OnceLock::new();
+const PUBLIC_API_FLOOR: Duration = Duration::from_micros(50);
+const EXTERNAL_BYTES: usize = 256;
+const INTERNAL_BYTES: usize = 512;
+const SENSITIVE_BYTES: usize = 512;
+
+type GlobalRingBuffer = ring_buffer::RingBufferLogger<4_096, 768>;
+
+static GLOBAL_RING: GlobalRingBuffer = GlobalRingBuffer::new_internal();
 
 #[inline]
-fn global_ring() -> &'static ring_buffer::RingBufferLogger {
-    GLOBAL_RING.get_or_init(|| ring_buffer::RingBufferLogger::new_internal(4_096, 2_048))
+fn global_ring() -> &'static GlobalRingBuffer {
+    &GLOBAL_RING
 }
 
 // ── Code lookup ───────────────────────────────────────────────────────────────
@@ -441,31 +455,49 @@ pub(crate) fn resolve_code(n: u16) -> &'static codes::ErrorCode {
 
 // ── Internal error payload ────────────────────────────────────────────────────
 
-/// Three-field context payload — all owned strings are zeroized on drop.
-///
-/// Not `Clone` or `Copy` — single-ownership semantics prevent accidental
-/// duplication of potentially sensitive string content.
+/// Three-field inline payload with deterministic truncation and zeroization.
 struct ErrorPayload {
-    /// Deceptive or sanitised message for external consumers (shown in Display).
-    external: Cow<'static, str>,
-    /// Internal diagnostic for SOC / forensic analysis — never forwarded externally.
-    internal: Cow<'static, str>,
-    /// High-sensitivity data (credentials, paths, identifiers).  `None` if the
-    /// caller supplied an empty string.
-    sensitive: Option<Cow<'static, str>>,
+    external: FixedString<EXTERNAL_BYTES>,
+    internal: FixedString<INTERNAL_BYTES>,
+    sensitive: FixedString<SENSITIVE_BYTES>,
+    sensitive_present: bool,
+}
+
+impl ErrorPayload {
+    fn new(external: &str, internal: &str, sensitive: &str) -> Self {
+        let mut payload = Self {
+            external: FixedString::new(),
+            internal: FixedString::new(),
+            sensitive: FixedString::new(),
+            sensitive_present: !sensitive.is_empty(),
+        };
+        payload
+            .external
+            .set_truncated(external, TRUNCATION_INDICATOR);
+        payload
+            .internal
+            .set_truncated(internal, TRUNCATION_INDICATOR);
+        if payload.sensitive_present {
+            payload
+                .sensitive
+                .set_truncated(sensitive, TRUNCATION_INDICATOR);
+        }
+        payload
+    }
+
+    #[cfg_attr(not(feature = "log"), allow(dead_code))]
+    #[inline]
+    fn sensitive(&self) -> Option<&str> {
+        self.sensitive_present.then(|| self.sensitive.as_str())
+    }
 }
 
 impl Zeroize for ErrorPayload {
     fn zeroize(&mut self) {
-        if let Cow::Owned(ref mut s) = self.external {
-            s.zeroize();
-        }
-        if let Cow::Owned(ref mut s) = self.internal {
-            s.zeroize();
-        }
-        if let Some(Cow::Owned(ref mut s)) = self.sensitive {
-            s.zeroize();
-        }
+        self.external.zeroize();
+        self.internal.zeroize();
+        self.sensitive.zeroize();
+        self.sensitive_present.zeroize();
     }
 }
 
@@ -486,13 +518,14 @@ impl Drop for ErrorPayload {
 ///
 /// ## Logging
 ///
-/// Use [`AgentError::log`] to persist an encrypted record to disk.
+/// Use [`AgentError::log`] to persist an encrypted record to disk when the
+/// `log` feature is enabled.
 ///
 /// ## Display invariants
 ///
-/// - `Display` emits only the obfuscated code and its deceptive category label.
-/// - `Debug` never includes payload content.
-/// - Neither leaks paths, hostnames, or any diagnostic information.
+/// - `Display` emits only the external payload.
+/// - `Debug` emits only the external payload unless `trusted_debug` is enabled.
+/// - Logs retain code, internal payload, and sensitive payload.
 ///
 /// Not `Clone` or `Copy` — the single-ownership model prevents side-channel
 /// leakage via unintended duplications of sensitive payload strings.
@@ -514,15 +547,15 @@ impl AgentError {
     /// | Parameter   | Exposed to  | Purpose                                   |
     /// |-------------|-------------|-------------------------------------------|
     /// | `code`      | obfuscated  | Numeric code from the table in module docs |
-    /// | `external`  | adversaries | Deceptive / sanitised external message     |
-    /// | `internal`  | SOC only    | True diagnostic; stays in-process          |
-    /// | `sensitive` | SOC + token | PII / paths; `None` if empty               |
+    /// | `external`  | terminal    | The only payload shown by default terminal output |
+    /// | `internal`  | logs only   | True diagnostic; stays out of default terminal formatting |
+    /// | `sensitive` | logs only   | PII / paths; `None` if empty               |
     ///
     /// # Automatic security properties (non-negotiable)
     ///
     /// 1. The code is obfuscated by the process-global session salt.
-    /// 2. A constant-time floor of ≥ 1 µs is enforced.
-    /// 3. The error is appended to the in-process DoS-bounded ring buffer.
+    /// 2. A constant-time floor of at least 50 µs is enforced.
+    /// 3. The error is appended to the preallocated in-process ring buffer.
     ///
     /// # Unknown codes
     ///
@@ -531,9 +564,9 @@ impl AgentError {
     /// always preferable to a panic in a hostile environment.
     pub fn new(
         code: u16,
-        external: impl Into<Cow<'static, str>>,
-        internal: impl Into<Cow<'static, str>>,
-        sensitive: impl Into<Cow<'static, str>>,
+        external: impl AsRef<str>,
+        internal: impl AsRef<str>,
+        sensitive: impl AsRef<str>,
     ) -> Self {
         let created_at = Instant::now();
 
@@ -541,42 +574,40 @@ impl AgentError {
         let base = resolve_code(code);
         let obfuscated = obfuscation::obfuscate_code(base);
 
-        let sensitive_cow = sensitive.into();
-        let sensitive_opt = if sensitive_cow.as_ref().is_empty() {
-            None
-        } else {
-            Some(sensitive_cow)
-        };
-
         let err = Self {
             code: obfuscated,
-            payload: ErrorPayload {
-                external: external.into(),
-                internal: internal.into(),
-                sensitive: sensitive_opt,
-            },
+            payload: ErrorPayload::new(external.as_ref(), internal.as_ref(), sensitive.as_ref()),
             retryable: false,
             created_at,
         };
 
-        // 2. Constant-time floor — must run before returning.
-        ct::enforce_floor(created_at, Duration::from_micros(1));
-
-        // 3. Append to DoS-bounded ring buffer (in-process forensic log).
+        // 2. Append to DoS-bounded ring buffer (in-process forensic log).
         global_ring().log_internal(&err);
+
+        // 3. Constant-time floor — must be the final public-path step.
+        ct::enforce_floor(created_at, PUBLIC_API_FLOOR);
 
         err
     }
 
     /// Enforce a minimum total error-path duration from construction time.
     pub fn with_timing_normalization(self, minimum_duration: Duration) -> Self {
-        ct::sleep_until(ct::deadline_from(self.created_at, minimum_duration));
+        let api_start = Instant::now();
+        let deadline = ct::deadline_from(self.created_at, minimum_duration)
+            .max(ct::deadline_from(api_start, PUBLIC_API_FLOOR));
+        ct::sleep_until(deadline);
         self
     }
 
-    /// Async variant of [`AgentError::with_timing_normalization`] with no runtime dependency.
+    /// Async variant of [`AgentError::with_timing_normalization`].
+    ///
+    /// This remains runtime-free and allocation-free, but it blocks the
+    /// current executor thread while waiting.
     pub async fn with_timing_normalization_async(self, minimum_duration: Duration) -> Self {
-        ct::sleep_until_async(ct::deadline_from(self.created_at, minimum_duration)).await;
+        let api_start = Instant::now();
+        let deadline = ct::deadline_from(self.created_at, minimum_duration)
+            .max(ct::deadline_from(api_start, PUBLIC_API_FLOOR));
+        ct::sleep_until_async(deadline).await;
         self
     }
 
@@ -584,66 +615,102 @@ impl AgentError {
 
     /// Persist an encrypted forensic record for this error to `path`.
     ///
-    /// `path` must be an absolute path to a log file.  The file is created if
-    /// it does not exist; records are always appended.  After each write the
-    /// file is set read-only (`0o400` on Unix), requiring `root` to read or
-    /// modify it.
+    /// `path` must be an absolute path to a regular log file. Symlinks are
+    /// rejected. The file is created if it does not exist; records are always
+    /// appended. After each write the file is set owner-read-only (`0o400` on
+    /// Unix) until the next append attempt reopens it.
     ///
     /// # Encryption
     ///
-    /// Each record is encrypted with AES-256-GCM using the process-lifetime
-    /// session key. An HMAC-SHA512 tag is appended for tamper detection. The
-    /// session key resides only in process memory and is never written to disk.
+    /// Each record uses a layered construction built from the process-lifetime
+    /// session key: inner AES-256-GCM, an outer SHA-512-derived masking layer,
+    /// and HMAC-SHA512 over the final frame. The session key resides only in
+    /// process memory and is never written to disk.
     ///
     /// # Allocation
     ///
-    /// This method allocates during encryption and I/O.  All other methods on
-    /// `AgentError` are allocation-free (modulo construction).
+    /// This method uses fixed-capacity stack buffers for record construction,
+    /// encryption, and authentication. It does not perform heap allocation.
     ///
     /// # Errors
     ///
-    /// Returns an `io::Error` on filesystem failure.  The log record is either
-    /// fully written and MAC-verified or not written at all; partial writes
-    /// are not possible due to the length-prefix framing.
+    /// Returns an `io::Error` on validation or filesystem failure. Length
+    /// prefixing and MAC verification let readers detect an incomplete trailing
+    /// record after an interrupted append.
+    #[cfg(feature = "log")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "log")))]
     pub fn log(&self, path: &Path) -> io::Result<()> {
-        use convenience::sanitize_string;
+        use std::fmt::Write as _;
 
-        // Build the plaintext record.  All user-supplied strings pass through
-        // sanitize_string to prevent log-injection attacks.
-        let code_str = self.code.to_string();
-        let ext_safe = sanitize_string(self.payload.external.as_ref());
-        let int_safe = sanitize_string(self.payload.internal.as_ref());
-        let sens_safe = self
-            .payload
-            .sensitive
-            .as_ref()
-            .map(|c| sanitize_string(c.as_ref()))
-            .unwrap_or_default();
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "log path must be absolute",
+            ));
+        }
 
-        // Wire format: structured key=value line, tab-delimited.
-        // Allocating here is explicitly permitted (log path).
+        let start = Instant::now();
         let ts_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
 
-        let plaintext = format!(
-            "TS={ts_ms}\tCODE={code_str}\tCAT={cat}\tIMPACT={impact}\t\
-             EXTERNAL={ext}\tINTERNAL={int}\tSENSITIVE={sens}\tRETRYABLE={retry}",
-            ts_ms = ts_ms,
-            code_str = code_str,
-            cat = self.code.category().deceptive_name(),
-            impact = self.code.impact().value(),
-            ext = ext_safe,
-            int = int_safe,
-            sens = if sens_safe.is_empty() {
-                "<NONE>"
-            } else {
-                &sens_safe
-            },
-            retry = self.retryable,
+        let mut ext_safe = FixedString::<{ convenience::MAX_SANITIZED_LEN }>::new();
+        convenience::sanitize_into(
+            &mut ext_safe,
+            self.payload.external.as_str(),
+            convenience::MAX_SANITIZED_LEN,
         );
 
-        log_sink::append_record(session_key(), path, plaintext.as_bytes())
+        let mut int_safe = FixedString::<{ convenience::MAX_SANITIZED_LEN }>::new();
+        convenience::sanitize_into(
+            &mut int_safe,
+            self.payload.internal.as_str(),
+            convenience::MAX_SANITIZED_LEN,
+        );
+
+        let mut sens_safe = FixedString::<{ convenience::MAX_SANITIZED_LEN }>::new();
+        if let Some(sensitive) = self.payload.sensitive() {
+            convenience::sanitize_into(&mut sens_safe, sensitive, convenience::MAX_SANITIZED_LEN);
+        }
+
+        let mut plaintext = FixedString::<{ log_sink::MAX_PLAINTEXT_BYTES }>::new();
+        let build_result = (|| -> fmt::Result {
+            write!(
+                &mut plaintext,
+                "TS={ts_ms}\tCODE={}\tCAT={}\tIMPACT={}\tEXTERNAL=",
+                self.code,
+                self.code.category().deceptive_name(),
+                self.code.impact().value(),
+            )?;
+            plaintext.write_str(ext_safe.as_str())?;
+            plaintext.write_str("\tINTERNAL=")?;
+            plaintext.write_str(int_safe.as_str())?;
+            plaintext.write_str("\tSENSITIVE=")?;
+            if sens_safe.is_empty() {
+                plaintext.write_str("<NONE>")?;
+            } else {
+                plaintext.write_str(sens_safe.as_str())?;
+            }
+            write!(
+                &mut plaintext,
+                "\tRETRYABLE={}",
+                if self.retryable { "true" } else { "false" }
+            )
+        })();
+
+        let result = match build_result {
+            Ok(()) => log_sink::append_record(session_key(), path, plaintext.as_str().as_bytes()),
+            Err(_) => Err(io::Error::other(
+                "log record exceeded fixed plaintext budget",
+            )),
+        };
+
+        plaintext.zeroize();
+        ext_safe.zeroize();
+        int_safe.zeroize();
+        sens_safe.zeroize();
+        ct::enforce_floor(start, PUBLIC_API_FLOOR);
+        result
     }
 
     // ── Crate-internal accessors (used by ring_buffer) ────────────────────────
@@ -655,12 +722,12 @@ impl AgentError {
 
     #[inline]
     pub(crate) fn external_payload(&self) -> &str {
-        self.payload.external.as_ref()
+        self.payload.external.as_str()
     }
 
     #[inline]
     pub(crate) fn internal_payload(&self) -> &str {
-        self.payload.internal.as_ref()
+        self.payload.internal.as_str()
     }
 
     #[inline]
@@ -675,43 +742,63 @@ impl Drop for AgentError {
     #[inline(never)]
     fn drop(&mut self) {
         zeroization::drop_zeroize(&mut self.payload);
+        self.retryable.zeroize();
     }
 }
 
 impl fmt::Display for AgentError {
-    /// Redacted external display.
-    ///
-    /// Format: `<Category> operation failed [<permanence>] (<OBFUSCATED-CODE>)`
-    ///
-    /// No payload content (external, internal, or sensitive) ever appears.
+    /// Terminal-facing external display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} operation failed [{}] ({})",
-            self.code.category().deceptive_name(),
-            if self.retryable {
-                "temporary"
-            } else {
-                "permanent"
-            },
-            self.code,
-        )
+        let start = Instant::now();
+        let result = f.write_str(self.payload.external.as_str());
+        ct::enforce_floor(start, PUBLIC_API_FLOOR);
+        result
     }
 }
 
+#[cfg(feature = "trusted_debug")]
+struct DisplayAsDebug<'a, T: ?Sized>(&'a T);
+
+#[cfg(feature = "trusted_debug")]
+impl<T> fmt::Debug for DisplayAsDebug<'_, T>
+where
+    T: fmt::Display + ?Sized,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.0, f)
+    }
+}
+
+#[cfg(feature = "trusted_debug")]
 impl fmt::Debug for AgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AgentError")
-            .field("code", &self.code.to_string())
-            .field("category", &self.code.category().display_name())
+        let start = Instant::now();
+        let result = f
+            .debug_struct("AgentError")
+            .field("code", &DisplayAsDebug(&self.code))
+            .field("external", &self.payload.external.as_str())
+            .field("internal", &self.payload.internal.as_str())
+            .field("sensitive", &self.payload.sensitive())
             .field("retryable", &self.retryable)
             .field("age_us", &self.created_at.elapsed().as_micros())
-            .field("payload", &"<REDACTED>")
-            .finish()
+            .finish();
+        ct::enforce_floor(start, PUBLIC_API_FLOOR);
+        result
     }
 }
 
-impl Error for AgentError {}
+#[cfg(not(feature = "trusted_debug"))]
+impl fmt::Debug for AgentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let start = Instant::now();
+        let result = f
+            .debug_struct("AgentError")
+            .field("external", &self.payload.external.as_str())
+            .finish();
+        ct::enforce_floor(start, PUBLIC_API_FLOOR);
+        result
+    }
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -729,44 +816,56 @@ mod tests {
         clear_salt();
         let err = AgentError::new(100, "lie msg", "real diag", "/etc/shadow");
         let display = format!("{}", err);
-        assert!(!display.contains("lie msg"), "external leaked");
+        assert!(display.contains("lie msg"), "external not shown");
         assert!(!display.contains("real diag"), "internal leaked");
         assert!(!display.contains("/etc/shadow"), "sensitive leaked");
-        assert!(display.contains("E-CFG-"), "obfuscated code missing");
     }
 
+    #[cfg(not(feature = "trusted_debug"))]
     #[test]
-    fn debug_output_never_contains_payload() {
+    fn debug_output_is_limited_without_trusted_debug() {
         let err = AgentError::new(100, "secret ext", "secret int", "secret sens");
         let debug = format!("{:?}", err);
-        assert!(!debug.contains("secret"), "payload leaked in Debug");
-        assert!(debug.contains("<REDACTED>"));
+        assert!(debug.contains("secret ext"), "external not shown in Debug");
+        assert!(!debug.contains("secret int"), "internal leaked in Debug");
+        assert!(!debug.contains("secret sens"), "sensitive leaked in Debug");
+    }
+
+    #[cfg(feature = "trusted_debug")]
+    #[test]
+    fn debug_output_includes_all_payloads_with_trusted_debug() {
+        let err = AgentError::new(100, "secret ext", "secret int", "secret sens");
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("secret ext"));
+        assert!(debug.contains("secret int"));
+        assert!(debug.contains("secret sens"));
+        assert!(debug.contains("E-CFG-"));
     }
 
     #[test]
     fn unknown_code_falls_back_to_core() {
         let err = AgentError::new(9999, "e", "i", "");
-        assert!(format!("{}", err).contains("E-CORE-"));
+        assert_eq!(err.code_inner().namespace().as_str(), "CORE");
     }
 
     #[test]
     fn empty_sensitive_stored_as_none() {
         // Verify the None path via internal accessor (pub(crate)).
         let err = AgentError::new(100, "e", "i", "");
-        assert!(err.payload.sensitive.is_none());
+        assert!(!err.payload.sensitive_present);
     }
 
     #[test]
     fn non_empty_sensitive_stored() {
         let err = AgentError::new(100, "e", "i", "secret");
-        assert!(err.payload.sensitive.is_some());
+        assert!(err.payload.sensitive_present);
     }
 
     #[test]
     fn ct_floor_enforced() {
         let start = Instant::now();
         let _ = AgentError::new(100, "e", "i", "");
-        assert!(start.elapsed() >= Duration::from_micros(1));
+        assert!(start.elapsed() >= PUBLIC_API_FLOOR);
     }
 
     #[test]
@@ -783,13 +882,14 @@ mod tests {
         // CFG code 100, salt 5 → offset 0+5=5 → E-CFG-105
         let err = AgentError::new(100, "e", "i", "");
         assert!(
-            format!("{}", err).contains("E-CFG-105"),
+            err.code_inner().to_string().contains("E-CFG-105"),
             "obfuscation not applied: {}",
-            err,
+            err.code_inner(),
         );
         clear_salt();
     }
 
+    #[cfg(feature = "log")]
     #[test]
     fn log_creates_encrypted_file() {
         let dir = std::env::temp_dir();
@@ -819,6 +919,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[cfg(feature = "log")]
     #[test]
     fn log_appends_multiple_records() {
         let dir = std::env::temp_dir();
@@ -843,5 +944,13 @@ mod tests {
             std::fs::set_permissions(&path, p).ok();
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(feature = "log")]
+    #[test]
+    fn log_rejects_relative_paths() {
+        let err = AgentError::new(100, "ext", "int", "sens");
+        let failure = err.log(Path::new("relative.log")).unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidInput);
     }
 }

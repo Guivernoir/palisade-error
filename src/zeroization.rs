@@ -4,6 +4,8 @@
 //! byte-clearing logic here and routing all sensitive-memory cleanup through
 //! this module.
 
+#[cfg(test)]
+use std::borrow::Cow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::atomic::{Ordering, compiler_fence};
@@ -45,7 +47,9 @@ pub(crate) fn zeroize_bytes(bytes: &mut [u8]) {
     }
 }
 
-/// Overwrite a `String`'s backing buffer and then clear its visible length.
+/// Test-only helper: overwrite a `String`'s backing buffer and then clear its
+/// visible length.
+#[cfg(test)]
 #[inline(never)]
 pub(crate) fn zeroize_string(s: &mut String) {
     // SAFETY: `String` guarantees its pointer is valid for `len` writable bytes.
@@ -55,12 +59,34 @@ pub(crate) fn zeroize_string(s: &mut String) {
     s.clear();
 }
 
+#[cfg(test)]
 impl Zeroize for String {
     fn zeroize(&mut self) {
         zeroize_string(self);
     }
 }
 
+#[cfg(test)]
+impl Zeroize for Cow<'static, str> {
+    fn zeroize(&mut self) {
+        if let Self::Owned(value) = self {
+            value.zeroize();
+        }
+    }
+}
+
+impl<T> Zeroize for Option<T>
+where
+    T: Zeroize,
+{
+    fn zeroize(&mut self) {
+        if let Some(value) = self {
+            value.zeroize();
+        }
+    }
+}
+
+#[cfg(test)]
 impl Zeroize for Vec<u8> {
     fn zeroize(&mut self) {
         zeroize_bytes(self.as_mut_slice());
@@ -90,9 +116,38 @@ impl Zeroize for u8 {
     }
 }
 
+impl Zeroize for bool {
+    fn zeroize(&mut self) {
+        // SAFETY: `self` is a valid writable byte for the duration of the call.
+        unsafe {
+            ptr::write_volatile(self, false);
+        }
+        compiler_fence(Ordering::SeqCst);
+    }
+}
+
+macro_rules! impl_zeroize_int {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl Zeroize for $ty {
+                fn zeroize(&mut self) {
+                    // SAFETY: `self` is a valid writable integer for the duration of the call.
+                    unsafe {
+                        ptr::write_volatile(self, 0);
+                    }
+                    compiler_fence(Ordering::SeqCst);
+                }
+            }
+        )+
+    };
+}
+
+impl_zeroize_int!(u16, u32, u64, usize);
+
 #[cfg(test)]
 mod tests {
     use super::Zeroize;
+    use std::borrow::Cow;
 
     #[test]
     fn string_zeroize_clears_length() {
@@ -106,5 +161,12 @@ mod tests {
         let mut value = [0xAB_u8; 8];
         value.zeroize();
         assert_eq!(value, [0u8; 8]);
+    }
+
+    #[test]
+    fn cow_owned_zeroize_clears_contents() {
+        let mut value: Cow<'static, str> = Cow::Owned(String::from("secret"));
+        value.zeroize();
+        assert_eq!(value.as_ref(), "");
     }
 }

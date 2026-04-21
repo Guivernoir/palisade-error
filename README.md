@@ -1,368 +1,194 @@
 # Palisade Errors
 
-**Security-conscious error handling for high-assurance Rust applications.**
+Security-conscious error handling for Rust services that operate against adversarial, deceptive, or high-scrutiny external surfaces.
 
-[![Crates.io](https://img.shields.io/crates/v/palisade-errors.svg)](https://crates.io/crates/palisade-errors)
-[![Documentation](https://docs.rs/palisade-errors/badge.svg)](https://docs.rs/palisade-errors)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+## Abstract
 
-Palisade Errors is designed for systems where **information leakage is a security vulnerability**. Built as the foundational error handling layer for the **Palisade Honeypot System**, it enforces a strict separation between "what happened" (forensics) and "what the adversary sees" (sanitization), while guaranteeing that sensitive data in memory is zeroized immediately after use.
+`palisade-errors` is a deliberately narrow error crate. Its public API is centered on a single type, `AgentError`, and its design prioritizes surface reduction, deterministic storage, redaction discipline, and bounded operational behavior over rich ecosystem interoperability.
 
-**Current Version:** 1.0.1
+The crate is intended for environments in which errors are not merely debugging artifacts but part of the observable attack surface. In that setting, the primary engineering question is not only "how do we represent failure?" but also "what does a hostile observer learn from the way failure is represented, timed, retained, and persisted?" Palisade Errors addresses that question with fixed-capacity payload handling, process-local code obfuscation, bounded in-memory forensics, timing normalization, and optional encrypted log persistence.
 
----
+This crate should be evaluated as an operationally opinionated component, not as a general-purpose replacement for the broader Rust error ecosystem.
 
-## 🎯 Design Philosophy
+## Positioning
 
-In a honeypot, every error is intelligence:
+The crate is a good fit when the following properties matter:
 
-- **For attackers:** Errors reveal system architecture, validation logic, and attack surface.
-- **For defenders:** Errors provide forensic trails, attack correlation, and threat intelligence.
+- external error surfaces must reveal as little as possible
+- public-path heap allocation should be avoided
+- sensitive payload storage should be zeroized on overwrite and drop
+- in-process forensic retention should remain memory-bounded
+- log persistence should be explicit, optional, and hardened
 
-Palisade Errors ensures attackers see only walls, while defenders see everything.
+It is a poor fit when the following priorities dominate:
 
----
+- rich error chaining across many third-party libraries
+- idiomatic derive-based integration with large application stacks
+- backtrace-first diagnostics for developer-facing tools
+- standardized cryptographic log formats
 
-## 🏗️ Architecture
+## Public Interface
 
-The library is built around two complementary error models that share the same security philosophy:
+The only named public type is `AgentError`. Supported entry points are inherent methods on that type:
 
-### `AgentError` — The Operational Layer
+- `AgentError::new(code, external, internal, sensitive)`
+- `AgentError::with_timing_normalization(duration)`
+- `AgentError::with_timing_normalization_async(duration)`
+- `AgentError::log(path)` when `feature = "log"`
 
-The primary error type for day-to-day use. Wraps a subsystem error code, operation context, optional sensitive source, metadata tags, and a retryability flag. All construction automatically applies session-specific error code obfuscation and enforces a 1 µs constant-time floor to prevent timing side-channels.
+No public namespace types, context wrappers, ring-buffer types, or code-table primitives are exposed.
 
-### `DualContextError` — The Deception Layer
+## Design Objectives
 
-A newer, type-enforced dual-context model built for honeypot-specific scenarios. It holds two explicitly typed contexts that cannot be confused at compile time:
+### 1. External Surface Discipline
 
-- **`PublicContext`** — what the adversary sees. Either a `Lie` (always available) or a `Truth` (gated behind the `external_signaling` feature flag).
-- **`InternalContext`** — what SOC analysts see. Can be `Diagnostic`, `Sensitive`, or a tracked `Lie` (for log exfiltration scenarios).
+`Display` emits only the external payload. `Debug` remains similarly constrained unless `trusted_debug` is enabled. This is the core redaction rule of the crate.
 
-Neither type implements `Display` in a leaking way. `InternalContext::Display` always emits `[INTERNAL CONTEXT REDACTED]`. You access internal content via explicit methods with deliberate API surface.
+### 2. Bounded Public-Path Behavior
 
-### `SocAccess` — Capability-Based Sensitive Access
+Payload text is stored inline in fixed-capacity buffers. The in-process forensic ring buffer is statically bounded. Optional encrypted log records are assembled in fixed-capacity buffers.
 
-Accessing `Sensitive`-classified internal context requires a `SocAccess` capability token:
+### 3. Sensitive Data Hygiene
+
+Inline payload buffers and transient cryptographic buffers are explicitly zeroized on overwrite and drop. This reduces residual exposure after normal object lifetimes, while not claiming protection against kernel- or hardware-level compromise.
+
+### 4. Stable Failure Semantics Under Observation
+
+Public construction, formatting, and optional log persistence use crate-local timing normalization helpers. The current implementation enforces a minimum 50 us public-path floor where applicable.
+
+### 5. Controlled Forensic Retention
+
+Each `AgentError::new()` appends one record to a bounded in-process ring buffer. This preserves local forensic value without allowing unbounded memory growth under adversarial triggering.
+
+## Security Model
+
+The crate assumes an attacker may:
+
+- trigger error paths repeatedly
+- observe externally formatted errors
+- compare timing across requests
+- recover crash dumps or residual process memory after compromise
+- exfiltrate persisted log files
+
+The crate aims to reduce information leakage through formatting, storage, and persistence behavior. It does not claim to secure the surrounding application, eliminate pre-error side channels, or provide a standardized cryptographic audit-log protocol.
+
+## Optional Logging
+
+Encrypted file logging is disabled by default and available only behind `feature = "log"`.
+
+```bash
+cargo run --example encrypted_logging --features log
+```
+
+When enabled, `AgentError::log()` writes one record using the following layered structure:
+
+- inner AES-256-GCM encryption
+- outer SHA-512-derived masking stream
+- HMAC-SHA512 over the final encrypted frame
+
+The implementation is intentionally bounded and zeroizes transient buffers after use. It should be understood as defense in depth, not as a substitute for a standardized, externally audited secure logging scheme.
+
+Operational constraints enforced by the current implementation:
+
+- the log path must be absolute
+- the log path must not be a symlink
+- new Unix log files are created owner-private
+- appends are followed by `sync_data()`
+- payload text is sanitized before plaintext framing to prevent line and field injection
+
+## Quick Start
 
 ```rust
-let access = SocAccess::acquire();
-if let Some(raw) = context.expose_sensitive(&access) {
-    send_to_encrypted_soc_siem(raw);
-}
-```
+use palisade_errors::AgentError;
 
-This is not cryptographic. Its purpose is **organizational safety**: making sensitive data access grep-able, explicit, and impossible to call accidentally through a generic formatting path.
-
-```
-Attacker Request
-    ↓
-Application Logic (fails)
-    ↓
-┌─────────────────────────────────────────┐
-│   AgentError / DualContextError         │
-│                                         │
-│  ┌────────────────────────────────────┐ │
-│  │ External (Display / PublicContext) │ │──→ Sanitized/deceptive response
-│  │ "Configuration failed (E-CFG-103)" │ │    (zero information leakage)
-│  └────────────────────────────────────┘ │
-│                                         │
-│  ┌────────────────────────────────────┐ │
-│  │ Internal (InternalLog / Internal   │ │──→ SOC forensic logs
-│  │ Context) — Full diagnostic context │ │    (complete audit trail)
-│  └────────────────────────────────────┘ │
-│                                         │
-│  ┌────────────────────────────────────┐ │
-│  │ Sensitive (local zeroization +     │ │──→ Encrypted, access-controlled
-│  │ volatile writes) — PII, creds,     │ │    restricted-access storage
-│  │ paths, keys                        │ │    (requires SocAccess token)
-│  └────────────────────────────────────┘ │
-└─────────────────────────────────────────┘
-    ↓ (on drop)
-Best-effort Memory Zeroization
-```
-
----
-
-## 🚀 Key Features
-
-- **Forensic Integrity:** Full stack traces, variable values, and internal state are preserved for your logs — but never reach the adversary.
-- **Dual-Context Model:** `DualContextError` gives type-enforced separation of public lies from internal truth.
-- **Capability-Based Access:** `SocAccess` prevents accidental sensitive data exposure through generic formatting paths.
-- **Information Hiding:** `Display` on all error types is sanitized to reveal only error codes and categories.
-- **Memory Safety:** Sensitive data flows through the crate-local `zeroization` module. Owned strings receive volatile writes on drop to defeat LLVM dead-store elimination. Secrets are wiped from memory as soon as the error is dropped.
-- **Always-On Obfuscation:** Session salts are applied at construction time. The same semantic error produces different codes across sessions, defeating fingerprinting.
-- **DoS Protection:** Log outputs are strictly truncated. Convenience macros enforce `sanitized!()` wrapping for dynamic arguments.
-- **Strict Taxonomy:** Feature flags enforce rigid error categorization at compile time.
-- **Timing Attack Mitigation:** Built-in 1 µs constant-time floor at construction, plus `with_timing_normalization()` for sensitive operation windows.
-- **Bounded Forensic Logging:** `RingBufferLogger` provides fixed-memory, DoS-proof forensic log storage.
-
----
-
-## ⚙️ Feature Flags
-
-| Flag | Default | Effect |
-|---|---|---|
-| `strict_taxonomy` | Off | Enforces namespace→category mappings at compile time. **Must be enabled in CI.** |
-| `strict_severity` | Off | Restricts Breach-level impacts to namespaces with `can_breach` authority. Recommended for production. |
-| `external_signaling` | Off | Enables `PublicContext::truth()` and `DualContextError::with_truth()`. Without this flag, **all external output must be deceptive** — enforced at compile time. |
-| `trusted_debug` | Off | Enables `InternalLog::format_for_trusted_debug()`. Only activates in `debug_assertions` builds. |
-| `with_timing_normalization_async()` | Always available | Runtime-free async timing normalization built on the crate-local `ct` module. |
-
----
-
-## 📖 Usage
-
-### Basic `AgentError`
-
-```rust
-use palisade_errors::{AgentError, definitions, Result};
-
-fn check_access(user: &str) -> Result<()> {
+fn validate_user(user: &str) -> Result<(), AgentError> {
     if user == "admin" {
         return Ok(());
     }
 
-    Err(AgentError::config(
-        definitions::CFG_PERMISSION_DENIED,
-        "check_access",
-        format!("User '{}' denied", user)
+    Err(AgentError::new(
+        103,
+        "Invalid credentials",
+        "username lookup failed during authentication flow",
+        user,
     ))
 }
 ```
 
-**Adversary sees:**
-```
-Configuration operation failed [permanent] (E-CFG-107)
-// Note: code is session-obfuscated — not E-CFG-104
-```
-
-**Your logs contain:**
-```
-[E-CFG-107] operation='check_access' details="User 'attacker' denied"
-```
-
-### Sensitive Data with `AgentError`
+By default, terminal formatting is intentionally minimal:
 
 ```rust
-use palisade_errors::{AgentError, definitions};
-
-let err = AgentError::config_sensitive(
-    definitions::CFG_INVALID_VALUE,
-    "login_flow",
-    "Password verification failed",  // Generic details — visible in internal logs
-    password_input                   // Sensitive: zeroized on drop, never in Display
-);
-```
-
-### The Dual-Context Model
-
-For maximum deception control, use `DualContextError` directly:
-
-```rust
-use palisade_errors::{DualContextError, OperationCategory};
-
-// Adversary sees generic error. SOC sees SQL injection attempt.
-let err = DualContextError::with_lie(
-    "Permission denied",
-    "Blocked SQL injection: UNION SELECT detected in parameter 'id'",
-    OperationCategory::Detection,
+let err = AgentError::new(
+    100,
+    "Request could not be completed",
+    "configuration parse failed near bootstrap file",
+    "/srv/palisade/config/bootstrap.toml",
 );
 
-// External category is also masked: Detection → "Routine Operation"
-assert_eq!(err.external_category(), "Routine Operation");
+assert_eq!(format!("{err}"), "Request could not be completed");
+assert!(!format!("{err:?}").contains("bootstrap.toml"));
 ```
 
-**When even internal logs might be exfiltrated:**
+## Feature Flags
 
-```rust
-let err = DualContextError::with_double_lie(
-    "Service temporarily unavailable",
-    "Routine maintenance window in progress",   // [LIE] prefix in SOC logs
-    OperationCategory::System,
-);
+- `log`: enables encrypted file logging
+- `strict_severity`: enables stricter internal impact validation
+- `trusted_debug`: allows `Debug` to expose code, external, internal, and sensitive payloads for trusted environments
+
+## Operational Guidance
+
+For production use, the crate should be treated as one layer in a broader control set. Recommended surrounding controls include:
+
+- application-level rate limiting on attacker-reachable failure paths
+- deliberate file placement and lifecycle management for encrypted logs
+- explicit policies for key custody, live-memory access, and crash-dump handling
+- routine validation on the target platform and workload, not only on developer workstations
+
+## Verification Workflow
+
+Local verification commands:
+
+```bash
+cargo fmt --all
+cargo check --all-targets --all-features
+cargo test
+cargo test --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+cargo check --manifest-path fuzz/Cargo.toml
 ```
 
-**Sensitive internal data:**
+Short fuzzing runs:
 
-```rust
-let err = DualContextError::with_lie_and_sensitive(
-    "Resource not found",
-    format!("Attempted access: /var/secrets/api_keys.txt by user {}", username),
-    OperationCategory::IO,
-);
-
-// Normal logging — no sensitive data emitted
-if let Some(payload) = err.internal().payload() {
-    soc_logger.write(format!("{}", payload));
-}
-
-// Restricted access — requires SocAccess capability
-let access = SocAccess::acquire();
-if let Some(raw) = err.internal().expose_sensitive(&access) {
-    send_to_encrypted_soc_siem(raw);
-}
+```bash
+cargo +nightly fuzz run agent_error_display -- -max_total_time=3
+cargo +nightly fuzz run agent_error_timing -- -max_total_time=3
+cargo +nightly fuzz run agent_error_log -- -max_total_time=3
 ```
 
-**When `external_signaling` is enabled**, you may emit truthful external messages for benign errors that improve the honeypot's authenticity:
+Benchmark entry points:
 
-```rust
-// Only compiles with feature = "external_signaling"
-let err = DualContextError::with_truth(
-    "Invalid JSON format",
-    "JSON parse error at line 42, column 15: expected closing brace",
-    OperationCategory::Configuration,
-);
+```bash
+cargo bench --bench performance
+cargo bench --bench memory
+cargo bench --bench performance --features log
+cargo bench --bench memory --features log
 ```
 
-Without the feature flag, `PublicContext::truth()` and `DualContextError::with_truth()` do not exist — compile-time enforcement of the deception-only policy.
+Reports are written under `target/bench-results/`.
 
-### Building Errors with `ContextBuilder`
+## Limitations
 
-For complex error construction with a fluent API:
+The current crate should be adopted with the following limits in mind:
 
-```rust
-use palisade_errors::{ContextBuilder, OperationCategory};
+- the encrypted log construction is custom and not externally audited
+- `with_timing_normalization_async()` blocks the current executor thread
+- the crate optimizes for surface reduction, not for ergonomic integration with common Rust error stacks
+- borrowed static strings remain recoverable from the compiled binary
+- the crate does not hide work performed before `AgentError` is created
 
-let err = ContextBuilder::new()
-    .public_lie("Operation failed")
-    .internal_diagnostic("Database connection timeout after 30s")
-    .category(OperationCategory::IO)
-    .build();
-```
+## Related Documents
 
-### Secure Logging with `AgentError`
-
-```rust
-if let Err(e) = result {
-    // Write full details to secure log
-    let mut log_buf = String::new();
-    e.internal_log().write_to(&mut log_buf).unwrap();
-    secure_logger.info(log_buf);
-
-    // Return sanitized error to caller
-    return Err(e);
-}
-```
-
-### Convenience Macros
-
-Macros enforce compile-time safety: operation names and format strings **must be string literals**, and dynamic arguments **must be wrapped in `sanitized!()`**:
-
-```rust
-use palisade_errors::{config_err, definitions, sanitized};
-
-let line_num = 42;
-
-// ✓ Correct — literal format, sanitized dynamic argument
-let err = config_err!(
-    &definitions::CFG_PARSE_FAILED,
-    "validate",
-    "Invalid value at line {}",
-    sanitized!(line_num)
-);
-```
-
-```rust,compile_fail
-// ✗ Compile error — operation must be a literal, not a runtime string
-let err = config_err!(&definitions::CFG_PARSE_FAILED, user_input, "Failed");
-```
-
-`sanitized!()` truncates to 256 characters at UTF-8 boundaries and replaces control characters with `?` to prevent log injection.
-
-### Attack Correlation with `AgentError`
-
-```rust
-let err = AgentError::config_sensitive(
-    definitions::CFG_VALIDATION_FAILED,
-    "ssh_authenticate",
-    "Authentication failed",
-    format!("username={} password={}", username, password)
-)
-.with_metadata("source_ip", attacker_ip)
-.with_metadata("protocol", "ssh")
-.with_metadata("campaign_id", detected_campaign);
-
-correlator.track_error(&err, attacker_ip);
-```
-
-### Timing Attack Mitigation
-
-```rust
-use palisade_errors::{AgentError, definitions};
-use std::time::Duration;
-
-fn authenticate(user: &str, pass: &str) -> palisade_errors::Result<()> {
-    if !user_exists(user) {
-        return Err(
-            AgentError::config(definitions::CFG_VALIDATION_FAILED, "auth", "Invalid credentials")
-                .with_timing_normalization(Duration::from_millis(100))
-        );
-    }
-
-    if !check_password(user, pass) {
-        return Err(
-            AgentError::config(definitions::CFG_VALIDATION_FAILED, "auth", "Invalid credentials")
-                .with_timing_normalization(Duration::from_millis(100))
-        );
-    }
-
-    Ok(())
-}
-```
-
-Both paths take at least 100 ms, preventing user enumeration via response time. The async variant, `with_timing_normalization_async()`, is available without a runtime-specific feature flag.
-
-### Bounded Forensic Logging
-
-```rust
-use palisade_errors::ring_buffer::RingBufferLogger;
-use palisade_errors::{AgentError, definitions};
-
-// Max 1000 entries, 2 KB per entry = 2 MB total memory ceiling
-let logger = RingBufferLogger::new(1000, 2048);
-
-let err = AgentError::config(definitions::CFG_PARSE_FAILED, "op", "details");
-logger.log(&err, "192.168.1.100");
-
-let recent = logger.get_recent(10);
-for entry in recent {
-    println!("[{}] {} — {}", entry.timestamp, entry.code, entry.operation);
-}
-```
-
-Oldest entries are evicted FIFO. Concurrent reads are supported via `RwLock`. No unbounded growth regardless of attack volume.
-
-### Error Code Obfuscation
-
-Obfuscation is applied automatically at `AgentError` construction. You can also use it directly:
-
-```rust
-use palisade_errors::obfuscation;
-
-// Per-session setup (call once per connection/session)
-let salt = obfuscation::generate_random_salt();
-obfuscation::init_session_salt(salt);
-
-// Session 1: E-CFG-103, Session 2: E-CFG-106, Session 3: E-CFG-101
-// Attacker cannot correlate codes across sessions.
-```
-
----
-
-## ⚖️ Governance & Taxonomy
-
-Strict governance of error codes and namespaces is critical to preventing information leakage through taxonomy drift.
-
-👉 **See [ERROR_GOVERNANCE.md](ERROR_GOVERNANCE.md) for the complete taxonomy rules, authority models, and feature flag requirements.**
-
-## ⚡ Performance
-
-This crate is architected for **zero-leak memory management** and **microsecond-level predictability**, even on legacy hardware.
-
-👉 **See [BENCH_AVG.md](BENCH_AVG.md) for detailed benchmarks, timing normalization analysis, and hardware validation.**
-
----
-
-## 🔄 License
-
-Licensed under Apache-2.0.
+- [Security Policy](SECURITY.md)
+- [Error Code Governance Contract](ERROR_GOVERNANCE.md)
+- [Performance and Allocation Notes](BENCH_AVG.md)
+- [Examples](examples/README.md)

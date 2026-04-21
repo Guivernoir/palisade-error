@@ -1,0 +1,37 @@
+[package]
+name = "palisade-errors-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.4", features = ["derive"] }
+libfuzzer-sys = "0.4"
+palisade-errors = { path = "..", features = ["log"] }
+
+[[bin]]
+name = "agent_error_display"
+path = "fuzz_targets/agent_error_display.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_error_log"
+path = "fuzz_targets/agent_error_log.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_error_timing"
+path = "fuzz_targets/agent_error_timing.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

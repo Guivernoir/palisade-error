@@ -1,219 +1,149 @@
 # Security Policy
 
-**Version:** 1.0.1
-**Last Updated:** February 17, 2026
+## Abstract
 
----
+This document defines the security posture, threat model, implemented controls, operational assumptions, and disclosure expectations for `palisade-errors`.
+
+The crate is designed to reduce information leakage through error handling in hostile or deceptive environments. It is not a complete security boundary and should not be presented as one.
+
+## Scope
+
+This policy covers the crate's behavior in the following areas:
+
+- public error construction and formatting
+- fixed-capacity payload handling
+- zeroization of inline and transient buffers
+- timing normalization on public paths
+- optional encrypted log persistence
+- bounded in-process forensic retention
+
+This policy does not cover the security of the surrounding application, operating system, deployment platform, or external log aggregation system.
 
 ## Threat Model
 
-`palisade-errors` is designed to operate in hostile environments where attackers may have:
+`palisade-errors` assumes attackers may:
 
-1. **Source Code Access:** Attackers know the internal error logic and can read this repository.
-2. **Trigger Capability:** Attackers can intentionally trigger errors to fingerprint the system.
-3. **Message Collection:** Attackers aggregate error messages to map internal architecture.
-4. **Memory Scraping:** Attackers may attempt to read process memory after a compromise (e.g., via core dumps or debugger attachment).
-5. **Timing Analysis:** Attackers measure response times to infer code paths.
-6. **Log Exfiltration:** Sophisticated attackers may compromise log aggregation infrastructure.
+1. trigger error paths repeatedly
+2. observe externally formatted errors
+3. compare response timing across requests
+4. inspect crash dumps or residual memory after compromise
+5. exfiltrate persisted log files
 
-This library is built for **honeypot systems** where EVERY error is intelligence that attackers will analyze.
+The crate is designed to reduce leakage under those conditions. It does not assume protection against kernel compromise, physical memory extraction, or hardware side-channel attacks.
 
----
+## Security Objectives
 
-## Core Security Architecture
+The crate currently pursues the following objectives:
 
-### Two-Layer Error Model
+- minimize externally visible diagnostic detail
+- keep the public path allocation-free
+- zeroize sensitive inline and transient buffers where feasible
+- constrain in-process forensic retention to a fixed bound
+- persist logs only through an explicit opt-in feature
+- reduce timing distinguishability across public error surfaces
 
-The library provides two complementary error types that share the same security philosophy:
+## Implemented Controls
 
-**`AgentError`** is the primary operational error type. It holds subsystem-specific context and wraps the legacy `InternalLog` access pattern. Obfuscation and constant-time enforcement are applied automatically at construction.
+### External Formatting
 
-**`DualContextError`** is the newer deception-native error type. It uses distinct wrapper types for public and internal context — `PublicContext` and `InternalContext` — that cannot be confused at compile time. Each has its own `Display` implementation with deliberate information policies:
+- `Display` exposes only the external payload
+- `Debug` exposes only the external payload unless `trusted_debug` is enabled
+- unknown numeric codes collapse to a safe core fallback instead of panicking
 
-- `PublicContext::Display` renders only the intended external string (which may be a lie).
-- `InternalContext::Display` always emits `[INTERNAL CONTEXT REDACTED]` regardless of content. Internal data is accessed via `payload()` or `expose_sensitive()` only.
+### Memory and Allocation Discipline
 
-### Design Guarantees
+- public payloads are stored in fixed-capacity inline buffers
+- the default public path avoids heap allocation
+- inline payload buffers are zeroized on overwrite and drop
+- transient cryptographic buffers used by logging are explicitly zeroized
 
-- **Sanitization:** `AgentError::Display` and `DualContextError::Display` never leak internal state, file paths, or variable values. External output format is fixed: `{Category} operation failed [{permanence}] ({ERROR-CODE})` for `AgentError`, or the public context string for `DualContextError`.
-- **Type-Enforced Trust Boundaries:** No implicit conversion exists between `PublicContext` and `InternalContext`. The type system prevents accidental cross-boundary leakage at compile time.
-- **Ephemerality:** Sensitive data is scrubbed through the crate-local `zeroization` module. Secrets are wiped from memory when the error is dropped.
-- **Volatile Write Protection:** `InternalContextField::Sensitive` variants receive `ptr::write_volatile` treatment in `Drop` to defeat LLVM dead-store elimination, followed by a `compiler_fence(SeqCst)` to prevent instruction reordering. This provides best-effort defense against compiler-level optimizations that could remove the clearing operation.
-- **DoS Resistance:** All log formatting is bounded. `InternalLog` fields are truncated at 1024 characters. Convenience macro arguments must be wrapped in `sanitized!()` which truncates at 256 characters and neutralizes control characters.
-- **Timing Resistance:** All `AgentError` construction enforces a 1 µs constant-time floor via spin loop. `with_timing_normalization()` and `with_timing_normalization_async()` extend this for sensitive operation windows.
-- **Memory Protection:** All context fields are zeroized on drop. The `Drop` implementation on `AgentError` is marked `#[inline(never)]` and uses `catch_unwind` to ensure cleanup runs even during panics.
-- **Error Code Obfuscation:** Session salts are applied at construction time. The same semantic error yields different codes across sessions, defeating fingerprint mapping.
+### Timing Behavior
 
----
+- public construction, formatting, timing normalization, and optional log persistence use the crate-local `ct` module
+- the current implementation enforces a minimum 50 us timing floor where applicable
 
-## What This Library Protects Against
+Timing normalization should be understood as leakage reduction, not proof of constant-time execution under all compilers, CPUs, and schedulers.
 
-### ✅ Information Disclosure via Error Messages
+### In-Process Forensics
 
-**Attack:** Attacker triggers errors to learn about system internals.
+- each `AgentError::new()` appends to a bounded ring buffer
+- forensic retention is memory-bounded and overwrite-based
+- the crate does not permit unbounded in-process error accumulation
 
-**Protection:** External errors use a fixed format regardless of failure reason. Neither `AgentError::Display` nor `DualContextError::Display` can emit operation names, file paths, or internal state. `DualContextError` goes further: the adversary receives an explicitly crafted deceptive message.
+## Logging Design
 
-- **External:** `I/O operation failed [permanent] (E-IO-805)`
-- **Hidden:** File path, error kind, internal state, actual operation name.
+Encrypted file logging is disabled by default and available only behind `feature = "log"`.
 
-### ✅ Deception Narrative Integrity
+When enabled, records are framed as:
 
-**Attack:** Attacker correlates error codes or messages across sessions to build an internal map.
+- `len || outer_nonce || masked(inner_nonce || aes_gcm_ciphertext || tag) || mac`
 
-**Protection:** Session-specific error code obfuscation applies a salt at construction time. The same logical error produces `E-CFG-103` in one session and `E-CFG-107` in another. Attacker cannot correlate codes without compromising the session salt.
+The current construction uses:
 
-The `DualContextError::with_double_lie()` constructor provides an additional layer for environments where even internal logs may be exfiltrated: both external and internal contexts contain intentionally false narratives, with the internal lie clearly marked `[LIE]` for SOC analyst awareness.
+- AES-256-GCM for the inner authenticated-encryption layer
+- a SHA-512-derived masking stream for the outer layer
+- HMAC-SHA512 over the final encrypted frame
 
-### ✅ Memory Forensics After Compromise
+Current hardening rules include:
 
-**Attack:** Attacker dumps memory after breach to recover credentials, paths, or session tokens.
+- the log path must be absolute
+- the log path must not be a symlink
+- new Unix log files are created owner-private
+- appends are followed by `sync_data()`
+- control characters are sanitized before plaintext framing
+- oversized records fail closed
 
-**Protection:** Three-layer defense on sensitive data:
+## Residual Risks and Non-Goals
 
-1. **High-level zeroization:** The crate-local `zeroization` module clears owned `String` buffers.
-2. **Volatile writes:** `ptr::write_volatile` over the raw buffer bytes prevents LLVM from removing the clearing operation as a dead store.
-3. **Compiler fence:** `compiler_fence(SeqCst)` ensures zeroization instructions complete before the drop chain continues.
+The crate does not guarantee the following:
 
-**What this does NOT guarantee:**
+- protection against kernel- or hardware-level memory disclosure
+- secrecy of borrowed string literals compiled into the binary
+- concealment of work performed before `AgentError` is constructed
+- safety of persisted logs without surrounding operational controls
+- compatibility with standardized secure-logging protocols
 
-- Hardware cache visibility — compiler fences do not flush CPU caches.
-- Cross-thread guarantees — other threads may observe old values in their caches.
-- Allocator-level security — memory may be reallocated before physical clearing.
-- DMA or swap — OS/hardware may have copied data before zeroization.
+The current log construction is custom. It has test coverage and bounded behavior, but it should not be described as externally audited or standards-based cryptographic logging.
 
-For cryptographic key material requiring HSM-grade wiping, use platform-specific APIs (`mlock`, `SecureZeroMemory`) and dedicated secure allocators in addition to this library.
+## Deployment Guidance
 
-### ✅ Timing-Based User Enumeration
+Production deployments should pair this crate with:
 
-**Attack:** Attacker measures response time to determine if a username exists, a path is valid, or a permission check took a different code path.
+- rate limiting on attacker-reachable failure paths
+- controlled crash-dump and core-dump policy
+- explicit placement and retention policy for encrypted log files
+- key-custody and live-memory access policy
+- environment-specific validation of timing and performance assumptions
 
-**Protection:**
+## Verification Expectations
 
-- All `AgentError` construction enforces a 1 µs constant-time floor via spin loop.
-- `with_timing_normalization(Duration)` adds a deadline-based delay on the error path to equalize timing across divergent code paths.
-- `with_timing_normalization_async(Duration).await` provides the same without blocking the executor thread and does not require a runtime-specific feature gate.
+Recommended release validation:
 
-Limitations: OS scheduling introduces 1–15 ms jitter. Network timing, cache behavior, and database queries are not covered. This is defense-in-depth, not a complete solution.
-
-### ✅ DoS via Massive Error Messages
-
-**Attack:** Attacker triggers errors with enormous payloads to exhaust memory during log formatting.
-
-**Protection:**
-
-- `InternalLog::write_to()` truncates all fields at 1024 bytes, appending `...[TRUNCATED]`. UTF-8 boundaries are respected; pathological inputs fall back to the truncation indicator only.
-- `sanitized!()` macro truncates at 256 characters and neutralizes control characters before they enter the error context.
-- `RingBufferLogger` provides a hard memory ceiling for forensic log storage. Total memory is bounded at construction time by `capacity × max_entry_bytes`. Oldest entries are evicted FIFO under any write volume.
-
-### ✅ Accidental Sensitive Data Exposure
-
-**Attack (internal):** Developer accidentally includes sensitive data in a public log path or formats an `InternalContext` into an HTTP response.
-
-**Protection:**
-
-- `InternalContext::Display` always returns `[INTERNAL CONTEXT REDACTED]`. It is impossible to accidentally emit internal context through `format!("{}", ctx)`.
-- `Sensitive` variant of `InternalContext` requires a `SocAccess` capability token to access raw content. The token cannot be acquired accidentally — it requires explicit `SocAccess::acquire()` call.
-- The `external_signaling` feature gate makes `PublicContext::truth()` unavailable by default. Without enabling the feature, the compiler rejects any attempt to emit truthful public messages, enforcing honeypot-first deception policy at compile time.
-
-### ✅ Compile-Time Taxonomy Drift
-
-**Attack (internal):** Developer creates an error code with a semantically wrong namespace/category pair, causing operational confusion or accidental information disclosure.
-
-**Protection:** `ErrorCode::const_new()` validates namespace–category compatibility and impact authority at compile time. Violations are compile errors in const contexts. The `strict_taxonomy` feature tightens this to reject all permissive fallbacks in CI.
-
----
-
-## Capability-Based Access Control
-
-Sensitive internal context requires a `SocAccess` capability token:
-
-```rust
-let access = SocAccess::acquire();
-if let Some(raw) = context.expose_sensitive(&access) {
-    send_to_encrypted_soc_siem(raw);
-}
+```bash
+cargo fmt --all
+cargo check --all-targets --all-features
+cargo test
+cargo test --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+cargo check --manifest-path fuzz/Cargo.toml
 ```
 
-This is **not cryptographic** — an attacker with code execution can trivially construct `SocAccess::acquire()`. The purpose is **organizational process safety**:
+Recommended adversarial checks:
 
-1. Forces explicit privilege acquisition (cannot call accidentally via generic trait).
-2. Makes sensitive data access grep-able: `grep -r "SocAccess::acquire"` shows every access point.
-3. Provides a clean integration point for future RBAC or audit hook systems.
-4. Prevents `format!("{}", internal_context)` from leaking anything useful.
+- fuzzing of display, timing, and log code paths
+- benchmark validation on the target hardware class
+- manual review of log-file placement and permission behavior on the deployment OS
 
-All calls to `SocAccess::acquire()` should be wrapped in audit logging at the application level.
+## Disclosure
 
----
+Please do not file public issues for potential security problems.
 
-## Performance Validation
+- Email: `strukturaenterprise@gmail.com`
+- Subject: `[SECURITY] palisade-errors`
 
-Security mechanisms are validated using high-fidelity benchmarks on constrained hardware to ensure they do not introduce denial-of-service vectors or side-channels of their own.
+Include, when possible:
 
-👉 **See [BENCH_AVG.md](BENCH_AVG.md) for detailed analysis of timing normalization, memory efficiency, obfuscation overhead, and burst handling.**
-
----
-
-## Error Code Governance
-
-Strict governance of error codes and namespaces is critical to preventing information leakage through taxonomy drift.
-
-👉 **See [ERROR_GOVERNANCE.md](ERROR_GOVERNANCE.md) for namespace authority models, strict taxonomy features, and CI requirements.**
-
----
-
-## What This Library Does NOT Protect Against
-
-### ❌ Application-Level Vulnerabilities
-
-This library handles errors; it does not prevent them. You must still validate inputs against SQL injection, XSS, and command injection at the application layer.
-
-### ❌ Network-Level Attacks
-
-This library does not prevent DDoS or packet sniffing.
-
-### ❌ CPU-Level Side Channels
-
-While timing normalization addresses application logic paths, we do not protect against micro-architectural attacks such as Spectre or Meltdown.
-
-### ❌ Allocator-Level Memory Persistence
-
-Volatile writes and zeroization operate on the string buffer itself. Memory freed to the allocator may be held in allocator-internal structures before returning to the OS. For keys and credentials that require guaranteed physical clearing, use `mlock` and platform-specific secure allocators.
-
-### ❌ Compiler-Enforced Secrets Across FFI Boundaries
-
-Sensitive `Cow::Borrowed` values (static string references) are not zeroized — static strings live in the binary. Do not use `&'static str` for runtime secrets.
-
----
-
-## Reporting a Vulnerability
-
-We take security seriously. If you discover a vulnerability in `palisade_errors`, please do **NOT** open a public issue.
-
-### Private Disclosure
-
-**Email:** `strukturaenterprise@gmail.com`
-**Subject:** `[SECURITY] Vulnerability in palisade_errors`
-
-### What to Include
-
-1. **Description:** What is vulnerable and why.
-2. **Impact:** What could an attacker do with this.
-3. **Steps to Reproduce:** Ideally, a proof-of-concept.
-4. **Proposed Fix:** If you have ideas.
-
-### Scope
-
-**In scope:**
-- Information disclosure via error messages or internal context leakage.
-- Memory leaks that bypass zeroization or volatile write protection.
-- DoS via unbounded allocations.
-- Timing side-channels in error handling logic.
-- Bypasses of the `SocAccess` capability model.
-- Taxonomy violations that reach external output.
-
-**Out of scope:**
-- Vulnerabilities in example code only.
-- Issues in upstream dependencies.
-- Theoretical attacks without practical exploit paths.
-- Hardware-level attacks (Spectre, Meltdown, cache timing).
+- affected version
+- reproduction steps
+- expected and observed behavior
+- deployment assumptions relevant to the issue

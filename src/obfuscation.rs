@@ -119,6 +119,7 @@ impl SessionSalt {
     ///
     /// A domain-separated HMAC-SHA512 binds the session identifier to the
     /// secret so the identifier alone is insufficient to predict the salt.
+    #[cfg(test)]
     #[inline]
     pub(crate) fn new_from_session_id(session_id: &str, secret: &[u8; 32]) -> Self {
         let hash = crypto::hmac_sha512_parts(
@@ -140,6 +141,7 @@ impl SessionSalt {
         }
     }
 
+    #[cfg(test)]
     #[inline]
     pub(crate) fn salt(&self) -> u8 {
         self.salt
@@ -162,7 +164,12 @@ impl SessionSalt {
             namespace_base + (offset + salt) % 100
         };
 
-        ErrorCode::const_new(base.namespace(), new_code, base.category(), base.impact())
+        ErrorCode::const_new(
+            base.namespace(),
+            new_code,
+            base.category().duplicate(),
+            base.impact().duplicate(),
+        )
     }
 }
 

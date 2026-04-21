@@ -3,42 +3,52 @@
 //! Public code in this crate calls into this module rather than depending on
 //! third-party crypto crates directly.
 
+#[cfg(test)]
 use crate::zeroization::Zeroize;
 use std::io;
 
 /// AES-GCM nonce length in bytes.
-pub(crate) const NONCE_LEN: usize = 12;
+#[cfg_attr(not(any(feature = "log", test)), allow(dead_code))]
+pub(crate) const NONCE_LEN: usize = crypto_bastion::NONCE_SIZE;
 /// AES-GCM authentication tag length in bytes.
-pub(crate) const TAG_LEN: usize = 16;
+#[cfg_attr(not(any(feature = "log", test)), allow(dead_code))]
+pub(crate) const TAG_LEN: usize = crypto_bastion::TAG_SIZE;
 /// SHA-512 digest length in bytes.
+#[cfg(any(feature = "log", test))]
 pub(crate) const SHA512_LEN: usize = 64;
 
+#[cfg(test)]
 const SHA512_BLOCK_LEN: usize = 128;
 
 /// Fill `out` with cryptographically secure random bytes from the OS.
+#[cfg_attr(not(feature = "log"), allow(dead_code))]
 pub(crate) fn fill_random(out: &mut [u8]) -> io::Result<()> {
     fill_random_inner(out)
 }
 
 /// Fill a fixed-size array with cryptographically secure random bytes.
 #[inline]
+#[cfg_attr(not(feature = "log"), allow(dead_code))]
 pub(crate) fn fill_random_array<const N: usize>(out: &mut [u8; N]) -> io::Result<()> {
     fill_random(out.as_mut_slice())
 }
 
 /// SHA-512 digest using `crypto_bastion`.
 #[inline]
+#[cfg(any(feature = "log", test))]
 pub(crate) fn sha512(data: &[u8]) -> [u8; SHA512_LEN] {
     crypto_bastion::hash(data)
 }
 
 /// Constant-time byte-slice equality comparison.
+#[cfg_attr(not(test), allow(dead_code))]
 #[inline]
 pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     crypto_bastion::compare(a, b)
 }
 
 /// HMAC-SHA512 implemented on top of `crypto_bastion::hash`.
+#[cfg(test)]
 pub(crate) fn hmac_sha512_parts(key: &[u8], parts: &[&[u8]]) -> [u8; SHA512_LEN] {
     let mut key_block = [0u8; SHA512_BLOCK_LEN];
     if key.len() > SHA512_BLOCK_LEN {
@@ -80,34 +90,37 @@ pub(crate) fn hmac_sha512_parts(key: &[u8], parts: &[&[u8]]) -> [u8; SHA512_LEN]
     mac
 }
 
-/// Encrypt `plaintext` with AES-256-GCM into a fresh ciphertext buffer.
-pub(crate) fn aes256_gcm_encrypt(
+/// Encrypt `plaintext` with AES-256-GCM into caller-provided output buffers.
+#[cfg_attr(not(any(feature = "log", test)), allow(dead_code))]
+pub(crate) fn aes256_gcm_encrypt_into(
     key: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
     aad: &[u8],
     plaintext: &[u8],
-) -> io::Result<(Vec<u8>, [u8; TAG_LEN])> {
-    let mut ciphertext = vec![0u8; plaintext.len()];
-    let mut tag = [0u8; TAG_LEN];
-    crypto_bastion::encrypt(key, nonce, aad, plaintext, &mut ciphertext, &mut tag)
+    ciphertext_out: &mut [u8],
+    tag_out: &mut [u8; TAG_LEN],
+) -> io::Result<usize> {
+    crypto_bastion::encrypt(key, nonce, aad, plaintext, ciphertext_out, tag_out)
         .map_err(io::Error::other)?;
-    Ok((ciphertext, tag))
+    Ok(plaintext.len())
 }
 
 /// Decrypt `ciphertext` with AES-256-GCM into a fresh plaintext buffer.
-pub(crate) fn aes256_gcm_decrypt(
+#[cfg(test)]
+pub(crate) fn aes256_gcm_decrypt_into(
     key: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
     aad: &[u8],
     ciphertext: &[u8],
     tag: &[u8; TAG_LEN],
-) -> io::Result<Vec<u8>> {
-    let mut plaintext = vec![0u8; ciphertext.len()];
-    crypto_bastion::decrypt(key, nonce, aad, ciphertext, tag, &mut plaintext)
+    plaintext_out: &mut [u8],
+) -> io::Result<usize> {
+    crypto_bastion::decrypt(key, nonce, aad, ciphertext, tag, plaintext_out)
         .map_err(io::Error::other)?;
-    Ok(plaintext)
+    Ok(ciphertext.len())
 }
 
+#[cfg(test)]
 fn total_len(base: usize, parts: &[&[u8]]) -> usize {
     parts
         .iter()
@@ -115,6 +128,7 @@ fn total_len(base: usize, parts: &[&[u8]]) -> usize {
 }
 
 #[cfg(unix)]
+#[cfg_attr(not(feature = "log"), allow(dead_code))]
 fn fill_random_inner(out: &mut [u8]) -> io::Result<()> {
     use std::fs::File;
     use std::io::Read;
@@ -166,7 +180,7 @@ fn fill_random_inner(_out: &mut [u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NONCE_LEN, SHA512_LEN, TAG_LEN, aes256_gcm_decrypt, aes256_gcm_encrypt, ct_eq,
+        NONCE_LEN, SHA512_LEN, TAG_LEN, aes256_gcm_decrypt_into, aes256_gcm_encrypt_into, ct_eq,
         hmac_sha512_parts, sha512,
     };
 
@@ -187,9 +201,15 @@ mod tests {
         let key = [0xAB_u8; 32];
         let nonce = [0x11_u8; NONCE_LEN];
         let plaintext = b"palisade";
-        let (ciphertext, tag) = aes256_gcm_encrypt(&key, &nonce, b"", plaintext).unwrap();
+        let mut ciphertext = [0u8; 8];
+        let mut tag = [0u8; TAG_LEN];
+        let len = aes256_gcm_encrypt_into(&key, &nonce, b"", plaintext, &mut ciphertext, &mut tag)
+            .unwrap();
         assert_eq!(tag.len(), TAG_LEN);
-        let decrypted = aes256_gcm_decrypt(&key, &nonce, b"", &ciphertext, &tag).unwrap();
-        assert_eq!(decrypted, plaintext);
+        let mut decrypted = [0u8; 8];
+        let decrypted_len =
+            aes256_gcm_decrypt_into(&key, &nonce, b"", &ciphertext[..len], &tag, &mut decrypted)
+                .unwrap();
+        assert_eq!(&decrypted[..decrypted_len], plaintext);
     }
 }
